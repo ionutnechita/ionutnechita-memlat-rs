@@ -358,6 +358,89 @@ pub fn run<W: Work, S: Sink>(work: &mut W, p: &Params, sink: &mut S) -> RunResul
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    // Work that spins `stall_tsc` ticks every `every` steps, like a core
+    // stall in the middle of an access
+    struct Stalling {
+        steps: u64,
+        every: u64,
+        stall_tsc: u64,
+        stalls: u64,
+    }
+
+    impl Work for Stalling {
+        fn step(&mut self) -> u64 {
+            self.steps += 1;
+            if self.steps % self.every == 0 {
+                let t0 = fenced_tsc();
+                while fenced_tsc() - t0 < self.stall_tsc {}
+                self.stalls += 1;
+            }
+            self.steps
+        }
+    }
+
+    // keeps every outlier; stops the loop at the `stop_after`-th publish
+    #[derive(Default)]
+    struct Record {
+        outs: Vec<Outlier>,
+        publishes: u64,
+        stop_after: Option<u64>,
+    }
+
+    impl Sink for Record {
+        fn outlier(&mut self, o: &Outlier) {
+            self.outs.push(*o);
+        }
+
+        fn publish(&mut self, _: &Stats, _: u64) -> bool {
+            self.publishes += 1;
+            self.stop_after.is_none_or(|n| self.publishes < n)
+        }
+    }
+
+    // every injected stall is reported as an outlier, the histogram adds up
+    // and the max covers the stall
+    #[test]
+    fn run_reports_stalls() {
+        let tpn = tsc_per_ns();
+        let stall_ns = 100_000.0;
+        let mut w = Stalling { steps: 0, every: 20_000, stall_tsc: (stall_ns * tpn) as u64, stalls: 0 };
+        let p = Params { tpn, thresh_ns: 50_000, duration_tsc: (200e6 * tpn) as u64, publish_tsc: u64::MAX };
+        let mut sink = Record::default();
+        let r = run(&mut w, &p, &mut sink);
+        let st = &r.stats;
+
+        assert!(w.stalls >= 10, "only {} stalls injected", w.stalls);
+        assert_eq!(st.iters, w.steps);
+        assert_eq!(r.idx, w.steps);
+        assert_eq!(st.hist.iter().sum::<u64>(), st.iters);
+        assert!(r.elapsed_tsc >= p.duration_tsc);
+        assert_eq!(st.nout, sink.outs.len() as u64);
+        assert!(sink.outs.iter().all(|o| o.ns >= p.thresh_ns));
+        assert!(sink.outs.windows(2).all(|w| w[0].tsc < w[1].tsc));
+        // the injected stalls, plus at most a few from the machine itself
+        let long = sink.outs.iter().filter(|o| o.ns as f64 >= stall_ns).count() as u64;
+        assert!(long >= w.stalls && long <= 2 * w.stalls + 10, "{long} long outliers, {} stalls", w.stalls);
+        assert!(st.hist[NBUCKETS - 1] >= w.stalls);
+        assert!(st.max_d as f64 / tpn >= stall_ns);
+    }
+
+    // a sink that returns false ends the run at that publish
+    #[test]
+    fn run_stops_on_publish() {
+        let tpn = tsc_per_ns();
+        let mut w = Stalling { steps: 0, every: u64::MAX, stall_tsc: 0, stalls: 0 };
+        let p = Params { tpn, thresh_ns: u64::MAX, duration_tsc: u64::MAX, publish_tsc: (10e6 * tpn) as u64 };
+        let mut sink = Record { stop_after: Some(3), ..Record::default() };
+        let r = run(&mut w, &p, &mut sink);
+        assert_eq!(sink.publishes, 3);
+        assert!(sink.outs.is_empty());
+        assert!(r.elapsed_tsc >= 3 * p.publish_tsc);
+        assert!(r.stats.core_mhz > 0 || r.stats.core_min == 0);
+    }
+
     // Repeated probes agree within a few percent (most of them). Pinned, so the
     // probes do not move between cores running at different clocks, and after
     // a warm-up, so the clock is no longer ramping up from idle. Depends on
