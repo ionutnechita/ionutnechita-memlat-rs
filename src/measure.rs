@@ -16,9 +16,7 @@ pub struct Node {
 
 const _: () = assert!(mem::size_of::<Node>() == LINE);
 
-pub const BUCKET_NS: [u64; 12] = [
-    100, 200, 500, 1000, 2000, 3000, 5000, 8000, 10000, 15000, 20000, u64::MAX,
-];
+pub const BUCKET_NS: [u64; 12] = [100, 200, 500, 1000, 2000, 3000, 5000, 8000, 10000, 15000, 20000, u64::MAX];
 pub const NBUCKETS: usize = BUCKET_NS.len();
 
 pub fn clock(id: libc::clockid_t) -> libc::timespec {
@@ -142,9 +140,7 @@ impl Mapping {
         let prot = libc::PROT_READ | libc::PROT_WRITE;
         let flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_POPULATE;
         // try hugetlb pages first to take the TLB out of the picture
-        let p = unsafe {
-            libc::mmap(ptr::null_mut(), size, prot, flags | libc::MAP_HUGETLB, -1, 0)
-        };
+        let p = unsafe { libc::mmap(ptr::null_mut(), size, prot, flags | libc::MAP_HUGETLB, -1, 0) };
         if p != libc::MAP_FAILED {
             return Ok(Mapping { ptr: p.cast(), size, lines, huge: true });
         }
@@ -298,13 +294,7 @@ pub fn run<W: Work, S: Sink>(work: &mut W, p: &Params, sink: &mut S) -> RunResul
     // histogram bounds converted to TSC ticks once, so the loop does no
     // floating point at all (ns are computed only for outliers):
     //   d / tpn >= B  <=>  d >= ceil(B * tpn)
-    let bucket_tsc = BUCKET_NS.map(|b| {
-        if b == u64::MAX {
-            u64::MAX
-        } else {
-            (b as f64 * tpn).ceil() as u64
-        }
-    });
+    let bucket_tsc = BUCKET_NS.map(|b| if b == u64::MAX { u64::MAX } else { (b as f64 * tpn).ceil() as u64 });
     let mut st = Stats::default();
     let mut win_max = 0u64;
     let mut idx;

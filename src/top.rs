@@ -258,12 +258,8 @@ pub fn finish(h: JoinHandle<Collected>) -> Collected {
 fn live_period(outs: &VecDeque<Outlier>) -> Option<String> {
     let now = clock(libc::CLOCK_MONOTONIC);
     let now = now.tv_sec as f64 * 1e9 + now.tv_nsec as f64;
-    let t: Vec<f64> = outs
-        .iter()
-        .rev()
-        .map(Outlier::mono_ns)
-        .take_while(|&t| now - t <= PERIOD_WINDOW_NS)
-        .collect();
+    let t: Vec<f64> =
+        outs.iter().rev().map(Outlier::mono_ns).take_while(|&t| now - t <= PERIOD_WINDOW_NS).collect();
     analysis::find(&t, analysis::LIVE_PAIRS).first().map(|g| format!("periodic {}", g.short(t.len())))
 }
 
@@ -420,8 +416,5 @@ impl Drop for Keys {
 // max over the publish windows in (prev_npub, cur_npub]
 fn window_max(prev_npub: u64, cur_npub: u64) -> u64 {
     let first = prev_npub.max(cur_npub.saturating_sub(RING as u64));
-    (first..cur_npub)
-        .map(|k| SHARED.win_max[k as usize % RING].load(Relaxed))
-        .max()
-        .unwrap_or(0)
+    (first..cur_npub).map(|k| SHARED.win_max[k as usize % RING].load(Relaxed)).max().unwrap_or(0)
 }

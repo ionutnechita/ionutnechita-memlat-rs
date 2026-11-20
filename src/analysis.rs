@@ -43,7 +43,7 @@ pub struct Phase {
 
 pub struct Grid {
     pub period_ns: f64,
-    pub anchor_ns: f64, // first outlier of the busiest phase
+    pub anchor_ns: f64,     // first outlier of the busiest phase
     pub phases: Vec<Phase>, // busiest first at offset 0, then ascending
     pub hits: usize,
     pub occupancy: f64, // share of slots (phases x periods) with an outlier
@@ -182,8 +182,7 @@ fn evaluate(t: &[f64], p: f64) -> Option<(Grid, Vec<bool>)> {
     let need = poisson_quantile(lam, FALSE_PHASES / (nb * CANDIDATES) as f64).max(MIN_CYCLES as f64);
     let win = |k: usize| c[(k + nb - 1) % nb] + c[k] + c[(k + 1) % nb];
     let sig: Vec<bool> = (0..nb).map(|k| win(k) as f64 >= need).collect();
-    let covered: Vec<bool> =
-        (0..nb).map(|k| sig[(k + nb - 1) % nb] || sig[k] || sig[(k + 1) % nb]).collect();
+    let covered: Vec<bool> = (0..nb).map(|k| sig[(k + nb - 1) % nb] || sig[k] || sig[(k + 1) % nb]).collect();
 
     // label runs of covered bins, going around the circle from a free bin
     let start = (0..nb).find(|&k| !covered[k])?;
@@ -359,9 +358,9 @@ fn fit_long(t: &[f64], (mut a, mut b): (usize, usize), mut p: f64) -> f64 {
                 let d = (r - o).rem_euclid(p);
                 d.min(p - d)
             };
-            let Some(k) = (0..g.phases.len()).min_by(|&i, &j| {
-                dist(g.phases[i].offset_ns).total_cmp(&dist(g.phases[j].offset_ns))
-            }) else {
+            let Some(k) = (0..g.phases.len())
+                .min_by(|&i, &j| dist(g.phases[i].offset_ns).total_cmp(&dist(g.phases[j].offset_ns)))
+            else {
                 break;
             };
             let y = x - g.anchor_ns - g.phases[k].offset_ns;
@@ -444,11 +443,8 @@ pub struct Coincidence {
 // groups of outliers from different CPUs whose times lie within `window_ns`
 // of the first one in the group
 pub fn coincident(per_cpu: &[Vec<(f64, u64)>], window_ns: f64) -> Vec<Coincidence> {
-    let mut all: Vec<(f64, usize, u64)> = per_cpu
-        .iter()
-        .enumerate()
-        .flat_map(|(c, v)| v.iter().map(move |&(t, d)| (t, c, d)))
-        .collect();
+    let mut all: Vec<(f64, usize, u64)> =
+        per_cpu.iter().enumerate().flat_map(|(c, v)| v.iter().map(move |&(t, d)| (t, c, d))).collect();
     all.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut out = Vec::new();
     let mut i = 0;
@@ -591,18 +587,17 @@ mod tests {
     #[test]
     fn real_4800() {
         let s = [
-            833.701016, 833.716037, 833.761187, 833.826317, 833.901537, 833.951616, 833.966637,
-            834.011789, 834.026838, 834.076918, 834.091936, 834.137087, 834.152137, 834.202217,
-            834.262388, 834.277438, 834.327518, 834.452818, 834.467838, 834.528047, 834.578119,
-            834.593140, 834.653338, 834.954019, 835.079318, 835.094339, 835.139491, 835.204627,
-            835.279846, 835.329919, 835.455220, 835.470239, 835.515397, 835.530441, 835.580519,
-            835.595540, 835.640694, 835.655740, 835.705828, 835.765991, 835.831120, 835.846140,
-            835.971448, 836.016592, 836.096743, 836.141897, 836.267192, 836.282241, 836.332321,
-            836.347342, 836.392494, 836.407544, 836.457630, 836.472641, 836.517793, 836.532841,
-            836.597942, 836.708223, 836.768400, 836.783444, 836.848543, 836.908743, 836.958831,
-            837.018994, 837.034045, 837.084122, 837.144295, 837.209424, 837.224443, 837.269593,
-            837.334727, 837.349744, 837.394896, 837.460026, 837.475051, 837.520193, 837.535251,
-            837.585331, 837.645497, 837.660547, 837.770794, 837.785848,
+            833.701016, 833.716037, 833.761187, 833.826317, 833.901537, 833.951616, 833.966637, 834.011789,
+            834.026838, 834.076918, 834.091936, 834.137087, 834.152137, 834.202217, 834.262388, 834.277438,
+            834.327518, 834.452818, 834.467838, 834.528047, 834.578119, 834.593140, 834.653338, 834.954019,
+            835.079318, 835.094339, 835.139491, 835.204627, 835.279846, 835.329919, 835.455220, 835.470239,
+            835.515397, 835.530441, 835.580519, 835.595540, 835.640694, 835.655740, 835.705828, 835.765991,
+            835.831120, 835.846140, 835.971448, 836.016592, 836.096743, 836.141897, 836.267192, 836.282241,
+            836.332321, 836.347342, 836.392494, 836.407544, 836.457630, 836.472641, 836.517793, 836.532841,
+            836.597942, 836.708223, 836.768400, 836.783444, 836.848543, 836.908743, 836.958831, 837.018994,
+            837.034045, 837.084122, 837.144295, 837.209424, 837.224443, 837.269593, 837.334727, 837.349744,
+            837.394896, 837.460026, 837.475051, 837.520193, 837.535251, 837.585331, 837.645497, 837.660547,
+            837.770794, 837.785848,
         ];
         let t: Vec<f64> = s.iter().map(|x| x * 1e9).collect();
         let g = find(&t, REPORT_PAIRS);
@@ -617,9 +612,22 @@ mod tests {
     #[test]
     fn sparse_3m() {
         let s = [
-            5126.210344, 5126.460963, 5127.087521, 5127.338140, 5127.588759, 5129.092472,
-            5129.343091, 5130.345556, 5130.846804, 5130.972113, 5131.097412, 5131.849279,
-            5133.603601, 5133.603611, 5133.854220, 5134.175860,
+            5126.210344,
+            5126.460963,
+            5127.087521,
+            5127.338140,
+            5127.588759,
+            5129.092472,
+            5129.343091,
+            5130.345556,
+            5130.846804,
+            5130.972113,
+            5131.097412,
+            5131.849279,
+            5133.603601,
+            5133.603611,
+            5133.854220,
+            5134.175860,
         ];
         let t: Vec<f64> = s.iter().map(|x| x * 1e9).collect();
         let g = find(&t, REPORT_PAIRS);
@@ -636,7 +644,9 @@ mod tests {
         let s = std::time::Instant::now();
         let g = find(&t, LIVE_PAIRS);
         eprintln!("{} outliers, {:?}", t.len(), s.elapsed());
-        for x in &g { eprintln!("{}", x.short(t.len())); }
+        for x in &g {
+            eprintln!("{}", x.short(t.len()));
+        }
         assert!((g[0].period_ns - 1e6).abs() < 10.0 && g[0].phases.len() == 1, "{}", g[0].short(t.len()));
         assert!(g.iter().any(|g| (g.period_ns - 125.31e6).abs() < 2e3 && g.phases.len() == 4));
     }
@@ -650,4 +660,3 @@ mod tests {
         assert_eq!(g[0].members.len(), 2);
     }
 }
-

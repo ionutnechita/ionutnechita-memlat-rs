@@ -595,10 +595,7 @@ fn print_run(c: &Config, tpn: f64, run: &CpuRun) {
         &run.outs[..n.min(PRINT_OUTLIERS)]
     };
     println!("\noutliers >= {} ns: {}{}", c.thresh_ns, st.nout, run.note);
-    println!(
-        "  {:>12} {:>10} {:>12} {:>20}",
-        "t (ms)", "dur (us)", "delta (ms)", "CLOCK_MONOTONIC"
-    );
+    println!("  {:>12} {:>10} {:>12} {:>20}", "t (ms)", "dur (us)", "delta (ms)", "CLOCK_MONOTONIC");
     for (i, o) in shown.iter().enumerate() {
         let tms = o.tsc as f64 / tpn / 1e6;
         let dms = if i > 0 { (o.tsc - shown[i - 1].tsc) as f64 / tpn / 1e6 } else { 0.0 };
@@ -670,10 +667,8 @@ fn print_coincidences(tpn: f64, runs: &[CpuRun]) {
             chance += per[a].len() as f64 * per[b].len() as f64 * 2.0 * COINCIDENCE_NS / span;
         }
     }
-    let on_all = groups
-        .iter()
-        .filter(|g| (0..runs.len()).all(|i| g.members.iter().any(|m| m.0 == i)))
-        .count();
+    let on_all =
+        groups.iter().filter(|g| (0..runs.len()).all(|i| g.members.iter().any(|m| m.0 == i))).count();
     println!("\nstalls on several CPUs at once (outlier times within {:.0} us):", COINCIDENCE_NS / 1e3);
     println!(
         "  {} instants on 2+ CPUs, {} on all {}; about {:.1} expected by chance",

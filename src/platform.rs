@@ -151,9 +151,8 @@ impl Boost {
         };
         if let (Some(rt), Some(period)) = (read("sched_rt_runtime_us"), read("sched_rt_period_us")) {
             if rt >= 0 && rt < period {
-                b.notes.push(format!(
-                    "sched_rt_runtime_us={rt} of {period}: RT throttling may pause the loop"
-                ));
+                b.notes
+                    .push(format!("sched_rt_runtime_us={rt} of {period}: RT throttling may pause the loop"));
             }
         }
         b
@@ -181,9 +180,7 @@ const MSR_SMI_COUNT: u64 = 0x34;
 
 fn is_intel() -> bool {
     static INTEL: OnceLock<bool> = OnceLock::new();
-    *INTEL.get_or_init(|| {
-        fs::read_to_string("/proc/cpuinfo").is_ok_and(|s| s.contains("GenuineIntel"))
-    })
+    *INTEL.get_or_init(|| fs::read_to_string("/proc/cpuinfo").is_ok_and(|s| s.contains("GenuineIntel")))
 }
 
 // SMIs so far (32-bit counter), read on the CPU the caller runs on. All

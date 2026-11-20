@@ -78,11 +78,14 @@ impl Pen {
     }
 
     fn sev(self, out: &mut String, s: Sev) {
-        self.sgr(out, match s {
-            Sev::Ok => "32",
-            Sev::Warn => "33",
-            Sev::Bad => "1;31",
-        });
+        self.sgr(
+            out,
+            match s {
+                Sev::Ok => "32",
+                Sev::Warn => "33",
+                Sev::Bad => "1;31",
+            },
+        );
     }
 
     fn reset(self, out: &mut String) {
@@ -176,8 +179,7 @@ fn mark(c: u64) -> (char, &'static str) {
 
 fn term_size() -> (usize, usize) {
     let mut ws: libc::winsize = unsafe { mem::zeroed() };
-    if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) } == 0 && ws.ws_col > 0
-    {
+    if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) } == 0 && ws.ws_col > 0 {
         (ws.ws_col as usize, ws.ws_row as usize)
     } else {
         (100, 50)
@@ -312,10 +314,8 @@ impl View {
         pen.reset(out);
         eol(out);
 
-        let (rate, max1, nout1) = self
-            .samples
-            .back()
-            .map_or((0.0, 0.0, 0), |s| (s.iters as f64 / s.dt, s.max_ns, s.nout));
+        let (rate, max1, nout1) =
+            self.samples.back().map_or((0.0, 0.0, 0), |s| (s.iters as f64 / s.dt, s.max_ns, s.nout));
         let nout60: u64 = self.last(60).map(|s| s.nout).sum();
         let _ = write!(out, " rate {:.1}M it/s, {} total   max ", rate / 1e6, si(tot.iters));
         pen.sev(out, sev(tot.max_ns, h.thresh_ns));
@@ -471,13 +471,7 @@ impl View {
         eol(out);
         for o in recent.iter().take(n.saturating_sub(1)) {
             let ns = o.ns as f64;
-            let _ = write!(
-                out,
-                " {:>13}.{:06} {:>11.3} ",
-                o.sec,
-                o.nsec / 1000,
-                o.tsc as f64 / h.tpn / 1e9
-            );
+            let _ = write!(out, " {:>13}.{:06} {:>11.3} ", o.sec, o.nsec / 1000, o.tsc as f64 / h.tpn / 1e9);
             pen.sev(out, sev(ns, h.thresh_ns));
             let _ = write!(out, "{:>9} ", fmt_ns(ns));
             hbar(out, ((log_pos(ns) * (bw * 8) as f64).round() as usize).max(1));
