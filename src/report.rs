@@ -3,7 +3,7 @@
 
 use crate::cli::Config;
 use crate::measure::{BUCKET_NS, Outlier, RunResult};
-use crate::{SETTLE_NS, STOP_CHECK_NS, analysis, platform, top};
+use crate::{SETTLE_NS, STOP_CHECK_NS, analysis, irq, platform, top};
 use std::fs::File;
 use std::io::{self, BufWriter, Write as _};
 
@@ -24,13 +24,61 @@ pub struct CpuRun {
     pub tsc_read_ns: f64, // cost of the lfence + rdtsc in every iteration
 }
 
-pub fn report(
-    c: &Config,
-    tpn: f64,
-    runs: &[CpuRun],
-    smi: (Option<u32>, Option<u32>),
-    boost: Option<&platform::Boost>,
-) {
+// SMI count and interrupt tables at the start of the measurement
+pub struct WindowStart {
+    smi: Option<u32>,
+    irq: irq::Snapshot,
+}
+
+impl WindowStart {
+    pub fn now(smi: Option<u32>) -> WindowStart {
+        WindowStart { smi, irq: irq::Snapshot::take() }
+    }
+
+    pub fn end(self, smi: Option<u32>) -> Window {
+        Window { smi: (self.smi, smi), irq: (self.irq, irq::Snapshot::take()) }
+    }
+}
+
+// what the system did during the measurement: SMI counts and interrupt
+// tables at its start and end
+pub struct Window {
+    pub smi: (Option<u32>, Option<u32>),
+    pub irq: (irq::Snapshot, irq::Snapshot),
+}
+
+const PRINT_IRQS: usize = 8;
+
+// "LOC 1000 (Local timer interrupts), RES 2 (...)", the busiest first
+fn irq_list(d: &[irq::Delta]) -> String {
+    if d.is_empty() {
+        return "none".to_string();
+    }
+    let mut s: Vec<String> = d.iter().take(PRINT_IRQS).map(irq::label).collect();
+    if d.len() > PRINT_IRQS {
+        s.push(format!("{} more", d.len() - PRINT_IRQS));
+    }
+    s.join(", ")
+}
+
+fn print_irqs(w: &Window, cpu: usize, what: &str) {
+    let (irqs, softirqs) = irq::cpu_deltas(&w.irq.0, &w.irq.1, cpu);
+    if irqs.is_none() && softirqs.is_none() {
+        return;
+    }
+    println!(
+        "
+interrupts on {what} during the measurement:"
+    );
+    if let Some(d) = irqs {
+        println!("  hardirqs: {}", irq_list(&d));
+    }
+    if let Some(d) = softirqs {
+        println!("  softirqs: {}", irq_list(&d));
+    }
+}
+
+pub fn report(c: &Config, tpn: f64, runs: &[CpuRun], w: &Window, boost: Option<&platform::Boost>) {
     // the raw data first, before any analysis
     let csv = c.log.as_ref().map(|path| (path, write_csv(path, tpn, runs)));
     for (i, run) in runs.iter().enumerate() {
@@ -38,8 +86,12 @@ pub fn report(
             println!("\n{}", "─".repeat(72));
         }
         print_run(c, tpn, run);
+        print_irqs(w, run.cpu, &format!("cpu {}", run.cpu));
     }
-    match smi {
+    if let Some(p) = c.partner {
+        print_irqs(w, p, &format!("the ping-pong partner (cpu {p})"));
+    }
+    match w.smi {
         (Some(a), Some(b)) => println!("\nSMIs during the run: {} (MSR_SMI_COUNT)", b.wrapping_sub(a)),
         _ => println!("\nSMIs during the run: unknown (needs root, the msr module and an Intel CPU)"),
     }

@@ -52,6 +52,7 @@ compile_error!("memlat supports only Linux on x86_64 (it times iterations with t
 mod analysis;
 mod c2c;
 mod cli;
+mod irq;
 mod measure;
 mod pingpong;
 mod platform;
@@ -63,6 +64,7 @@ use measure::{Mapping, Outlier, Params, RunResult, Sink, Stats};
 use report::{CpuRun, report};
 use std::io;
 use std::sync::{Arc, Barrier};
+use std::time::{Duration, Instant};
 use std::{env, process, thread};
 
 const STOP_CHECK_NS: f64 = 100e6; // benchmark: how often Ctrl-C is noticed
@@ -153,17 +155,19 @@ fn fifo(prio: Option<i32>) {
     }
 }
 
-// the timed loop on whichever work the config asks for
+// the timed loop on whichever work the config asks for; `at_start` runs
+// between the settle phase and the measured run
 fn measure_on(
     map: Option<&Mapping>,
     pp: Option<&pingpong::Shared>,
     p: &Params,
     sink: &mut impl Sink,
+    at_start: impl FnOnce(),
 ) -> RunResult {
     match (map, pp) {
-        (Some(m), _) => settled(&mut m.chase(), p, sink),
+        (Some(m), _) => settled(&mut m.chase(), p, sink, at_start),
         (None, Some(s)) => {
-            let r = settled(&mut s.pinger(), p, sink);
+            let r = settled(&mut s.pinger(), p, sink, at_start);
             s.stop();
             r
         }
@@ -185,9 +189,15 @@ impl Sink for Discard {
 // The loop spins SETTLE_NS before the measured run starts, so one-off effects
 // of starting it (the tick stopping on nohz_full, kthread priorities being
 // lifted, the other threads starting up) are not reported as stalls.
-fn settled<W: measure::Work>(w: &mut W, p: &Params, sink: &mut impl Sink) -> RunResult {
+fn settled<W: measure::Work>(
+    w: &mut W,
+    p: &Params,
+    sink: &mut impl Sink,
+    at_start: impl FnOnce(),
+) -> RunResult {
     let settle = Params { duration_tsc: (SETTLE_NS * p.tpn) as u64, ..*p };
     measure::run(w, &settle, &mut Discard);
+    at_start();
     measure::run(w, p, sink)
 }
 
@@ -265,7 +275,7 @@ fn benchmark(prog: &str, a: &[String]) {
                     fifo(prio);
                     let tsc_read_ns = measure::tsc_overhead() as f64 / tpn;
                     ready.wait();
-                    let r = measure_on(map.as_ref(), pp.as_deref(), &p, &mut sink);
+                    let r = measure_on(map.as_ref(), pp.as_deref(), &p, &mut sink, || {});
                     sink.buf.truncate(sink.len);
                     let note = if r.stats.nout > sink.len as u64 {
                         format!(" (first {} kept)", sink.len)
@@ -282,14 +292,20 @@ fn benchmark(prog: &str, a: &[String]) {
     // (which exits) cannot leave them raised
     ready.wait();
     let mut boost = c.fifo.map(|prio| platform::Boost::apply(&c.all_cpus(), prio));
-    let smi0 = platform::smi_count();
+    // the threads settle for SETTLE_NS, then measure; count SMIs and
+    // interrupts from about then (Ctrl-C cuts the wait short)
+    let settle_end = Instant::now() + Duration::from_secs_f64(SETTLE_NS / 1e9);
+    while Instant::now() < settle_end && !platform::stop_requested() {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let start = report::WindowStart::now(platform::smi_count());
     let runs: Vec<CpuRun> = threads.into_iter().map(|t| t.join().expect("measurement thread")).collect();
-    let smi = (smi0, platform::smi_count());
+    let window = start.end(platform::smi_count());
     if let Some(t) = partner {
         let _ = t.join();
     }
     finished(boost.as_mut());
-    report(&c, tpn, &runs, smi, boost.as_ref());
+    report(&c, tpn, &runs, &window, boost.as_ref());
 }
 
 fn top(prog: &str, a: &[String]) {
@@ -316,7 +332,11 @@ fn top(prog: &str, a: &[String]) {
         duration_tsc: u64::MAX,
         publish_tsc: (top::PUBLISH_NS * tpn) as u64,
     };
-    let r = measure_on(map.as_ref(), pp.as_deref(), &p, &mut top::Live);
+    // interrupts from the end of the settle phase; the display thread counts
+    // the SMIs, as reading the MSR here would mean an IPI to another CPU
+    let mut irq0 = irq::Snapshot::default();
+    let r = measure_on(map.as_ref(), pp.as_deref(), &p, &mut top::Live, || irq0 = irq::Snapshot::take());
+    let irq1 = irq::Snapshot::take();
     if let Some(t) = partner {
         let _ = t.join();
     }
@@ -324,7 +344,8 @@ fn top(prog: &str, a: &[String]) {
     let got = top::finish(display);
     let note = if got.missed > 0 { format!(" ({} not kept)", got.missed) } else { String::new() };
     let run = CpuRun { cpu, lines, huge, r, outs: got.outs, note, newest: true, tsc_read_ns };
-    report(&c, tpn, &[run], got.smi, boost.as_ref());
+    let window = report::Window { smi: got.smi, irq: (irq0, irq1) };
+    report(&c, tpn, &[run], &window, boost.as_ref());
 }
 
 fn c2c(prog: &str, a: &[String]) {
