@@ -505,3 +505,66 @@ fn time_axis(out: &mut String, w: usize, shown: usize) {
     }
     eol(out);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durations() {
+        assert_eq!(fmt_ns(0.0), "0ns");
+        assert_eq!(fmt_ns(999.0), "999ns");
+        assert_eq!(fmt_ns(1500.0), "1.50us");
+        assert_eq!(fmt_ns(25_000.0), "25us");
+        assert_eq!(fmt_ns(999_000.0), "999us");
+        assert_eq!(fmt_ns(2.5e6), "2.5ms");
+    }
+
+    #[test]
+    fn counts() {
+        assert_eq!(si(0), "0");
+        assert_eq!(si(9_999), "9999");
+        assert_eq!(si(10_000), "10.0k");
+        assert_eq!(si(1_500_000), "1.5M");
+        assert_eq!(si(2_000_000_000), "2.0G");
+    }
+
+    #[test]
+    fn axis_labels() {
+        assert_eq!(axis_label(0.316), "300ns");
+        assert_eq!(axis_label(0.1), "100ns");
+        assert_eq!(axis_label(3.16), "3us");
+        assert_eq!(axis_label(31.6), "30us");
+        assert_eq!(axis_label(1000.0), "1ms");
+    }
+
+    #[test]
+    fn bucket_labels() {
+        let labels: Vec<String> = (0..NBUCKETS).map(bucket_label).collect();
+        assert_eq!(labels[0], "0-100ns");
+        assert_eq!(labels[3], "500ns-1us");
+        assert_eq!(labels[4], "1-2us");
+        assert_eq!(labels[NBUCKETS - 1], ">=20us");
+        // short enough for the label column
+        assert!(labels.iter().all(|l| l.chars().count() <= LABEL), "{labels:?}");
+    }
+
+    #[test]
+    fn log_positions() {
+        assert_eq!(log_pos(0.0), 0.0);
+        assert_eq!(log_pos(100.0), 0.0);
+        assert_eq!(log_pos(1e6), 1.0);
+        assert_eq!(log_pos(1e9), 1.0);
+        assert!((log_pos(10_000.0) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn bars() {
+        let mut s = String::new();
+        hbar(&mut s, 8 * 3 + 4);
+        assert_eq!(s, "███▌");
+        s.clear();
+        hbar(&mut s, 0);
+        assert_eq!(s, "");
+    }
+}
