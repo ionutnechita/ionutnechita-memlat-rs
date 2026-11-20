@@ -39,6 +39,11 @@
 //   e.g. memlat benchmark 61 512K 60 ; memlat benchmark 2,40 16G 60 --fifo 1
 //        memlat top 61 16M --log out.csv
 
+// The loop times every iteration with lfence + rdtsc and relies on Linux
+// (sched_setaffinity, mlockall, MAP_HUGETLB, /proc, /dev/cpu/N/msr).
+#[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
+compile_error!("memlat supports only Linux on x86_64 (it times iterations with the TSC)");
+
 mod analysis;
 mod c2c;
 mod measure;
