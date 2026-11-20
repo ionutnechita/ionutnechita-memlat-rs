@@ -50,7 +50,8 @@ are not reported.
 
 ## Requirements
 
-- Linux on x86_64 with an invariant TSC.
+- Linux on x86_64 with an invariant TSC (`constant_tsc` and `nonstop_tsc` in
+  `/proc/cpuinfo`; `memlat` warns when they are missing, as in some VMs).
 - Rust 1.85 or newer (edition 2024).
 - Optional, for better results:
   - isolated CPUs (`isolcpus=`, `nohz_full=`, `rcu_nocbs=`) to measure on;
@@ -87,6 +88,11 @@ defaults to 3000 ns.
 | `--fifo PRIO` | run the loop as `SCHED_FIFO` PRIO (1-98); `ktimers/N`, `irq_work/N` and `rcuc/N` of the measured CPUs are lifted above it for the run and restored afterwards |
 | `--keep N` | outliers kept per CPU (default 65536) |
 | `--pingpong CPU` | partner CPU for the round-trip mode |
+| `-V`, `--version` | print the version |
+| `-h`, `--help` | print the usage text |
+
+Invalid arguments (a CPU that does not exist or is offline, a size that does
+not fit, an unknown option) exit with status 1 and a message on stderr.
 
 Examples:
 
@@ -105,6 +111,33 @@ memlat benchmark 2 60 --pingpong 3
 
 # core-to-core latency of CPUs 0-15
 memlat c2c 0-15
+```
+
+## CSV output (`--log FILE`)
+
+`benchmark` and `top` write one line per kept outlier, all CPUs in one file,
+oldest first per CPU:
+
+| Column | Meaning |
+|---|---|
+| `cpu` | measured CPU |
+| `clock_monotonic` | `CLOCK_MONOTONIC` at the end of the iteration, seconds with ns resolution |
+| `t_ms` | time since the start of the measurement, ms |
+| `dur_us` | duration of the iteration, us |
+| `delta_ms` | time since the previous outlier on the same CPU, ms (0 for the first) |
+
+```text
+cpu,clock_monotonic,t_ms,dur_us,delta_ms
+3,20824.918914163,0.772441,52.083,0.000000
+3,20824.918961800,0.820192,17.295,0.047751
+```
+
+`c2c` writes one line per measured pair, one-way latencies in ns (round trip
+/ 2, TSC read cost removed):
+
+```text
+cpu_a,cpu_b,min_ns,median_ns,p99_ns,max_ns
+1,0,107.42,117.19,154.62,40107.02
 ```
 
 ## Example output
@@ -152,6 +185,11 @@ median one-way latency (ns):
 ```
 
 ## Tests
+
+Unit tests cover the argument parsing, the period search, the measurement
+loop (with a fake workload that injects stalls) and the live-view
+formatting; integration tests run the binary and check its exit codes and
+messages.
 
 ```sh
 cargo test --release
