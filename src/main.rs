@@ -58,8 +58,10 @@ mod pingpong;
 mod platform;
 mod report;
 mod top;
+mod trace;
 mod view;
 
+use cli::Config;
 use measure::{Mapping, Outlier, Params, RunResult, Sink, Stats};
 use report::{CpuRun, report};
 use std::io;
@@ -242,10 +244,45 @@ impl Sink for Collect {
     }
 }
 
+// passes every outlier to the ftrace marker too (--tracemark, --breaktrace)
+struct Traced<S> {
+    inner: S,
+    tracer: Option<trace::Tracer>,
+}
+
+impl<S: Sink> Sink for Traced<S> {
+    fn outlier(&mut self, o: &Outlier) {
+        self.inner.outlier(o);
+        if let Some(t) = &self.tracer {
+            t.outlier(o);
+        }
+    }
+
+    fn publish(&mut self, st: &Stats, win_max: u64) -> bool {
+        self.inner.publish(st, win_max)
+    }
+}
+
+fn tracer(cpu: usize, c: &Config) -> Option<trace::Tracer> {
+    trace::Tracer::open(cpu, c.tracemark, c.breaktrace_us).unwrap_or_else(|e| die("ftrace", e))
+}
+
+// before anything starts: ftrace must be there if asked for
+fn check_trace(c: &Config) {
+    if !c.tracemark && c.breaktrace_us.is_none() {
+        return;
+    }
+    if let Err(msg) = trace::check(c.tracemark, c.breaktrace_us) {
+        eprintln!("{msg}");
+        process::exit(1);
+    }
+}
+
 fn benchmark(prog: &str, a: &[String]) {
     let (c, secs) = or_exit(prog, cli::benchmark(a));
     check_cpus(prog, &c.all_cpus());
     check_memory(c.size, c.cpus.len());
+    check_trace(&c);
     platform::warn_tsc();
     platform::install_signal_handlers();
     platform::avoid_cpus(&c.all_cpus());
@@ -265,17 +302,20 @@ fn benchmark(prog: &str, a: &[String]) {
         .iter()
         .map(|&cpu| {
             let (ready, size, keep, prio, pp) = (Arc::clone(&ready), c.size, c.keep, c.fifo, pp.clone());
+            let tracer = tracer(cpu, &c);
             thread::Builder::new()
                 .name(format!("memlat-{cpu}"))
                 .spawn(move || {
                     platform::block_signals();
                     // allocated before setup() so mlockall covers it
-                    let mut sink = Collect { buf: vec![Outlier::default(); keep], len: 0 };
+                    let inner = Collect { buf: vec![Outlier::default(); keep], len: 0 };
+                    let mut sink = Traced { inner, tracer };
                     let map = setup(cpu, size);
                     fifo(prio);
                     let tsc_read_ns = measure::tsc_overhead() as f64 / tpn;
                     ready.wait();
                     let r = measure_on(map.as_ref(), pp.as_deref(), &p, &mut sink, || {});
+                    let mut sink = sink.inner;
                     sink.buf.truncate(sink.len);
                     let note = if r.stats.nout > sink.len as u64 {
                         format!(" (first {} kept)", sink.len)
@@ -312,6 +352,7 @@ fn top(prog: &str, a: &[String]) {
     let c = or_exit(prog, cli::top(a));
     check_cpus(prog, &c.all_cpus());
     check_memory(c.size, 1);
+    check_trace(&c);
     platform::warn_tsc();
     let cpu = c.cpus[0];
     platform::install_signal_handlers();
@@ -335,7 +376,8 @@ fn top(prog: &str, a: &[String]) {
     // interrupts from the end of the settle phase; the display thread counts
     // the SMIs, as reading the MSR here would mean an IPI to another CPU
     let mut irq0 = irq::Snapshot::default();
-    let r = measure_on(map.as_ref(), pp.as_deref(), &p, &mut top::Live, || irq0 = irq::Snapshot::take());
+    let mut sink = Traced { inner: top::Live, tracer: tracer(cpu, &c) };
+    let r = measure_on(map.as_ref(), pp.as_deref(), &p, &mut sink, || irq0 = irq::Snapshot::take());
     let irq1 = irq::Snapshot::take();
     if let Some(t) = partner {
         let _ = t.join();

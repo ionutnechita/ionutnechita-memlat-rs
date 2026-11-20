@@ -47,6 +47,9 @@ options:
                    and rcuc/N of the measured cpus are lifted above it for the run
   --keep N         outliers kept per cpu (default {DEFAULT_KEEP})
   --pingpong CPU   partner cpu for the round-trip mode
+  --tracemark      write every outlier to the ftrace buffer (trace_marker)
+  --breaktrace US  stop ftrace (tracing_on = 0) and the run at the first
+                   outlier of at least US microseconds
   -V, --version    print the version
   -h, --help       this text"
     )
@@ -124,12 +127,31 @@ pub struct Opts {
     pub fifo: Option<i32>,
     pub keep: usize,
     pub partner: Option<usize>,
+    pub tracemark: bool,
+    pub breaktrace_us: Option<u64>,
 }
+
+impl Default for Opts {
+    fn default() -> Opts {
+        Opts {
+            log: None,
+            fifo: None,
+            keep: DEFAULT_KEEP,
+            partner: None,
+            tracemark: false,
+            breaktrace_us: None,
+        }
+    }
+}
+
+// options without a value
+const FLAGS: [&str; 1] = ["tracemark"];
+const VALUED: [&str; 5] = ["log", "fifo", "keep", "pingpong", "breaktrace"];
 
 // options may come anywhere; returns them and the positional arguments
 pub fn options(args: &[String]) -> Result<(Opts, Vec<String>)> {
     let mut pos = Vec::new();
-    let mut o = Opts { log: None, fifo: None, keep: DEFAULT_KEEP, partner: None };
+    let mut o = Opts::default();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -145,7 +167,14 @@ pub fn options(args: &[String]) -> Result<(Opts, Vec<String>)> {
             Some((n, v)) => (n, Some(v.to_string())),
             None => (opt, None),
         };
-        if !matches!(name, "log" | "fifo" | "keep" | "pingpong") {
+        if FLAGS.contains(&name) {
+            if inline.is_some() {
+                return invalid(format!("--{name} takes no value"));
+            }
+            o.tracemark = true;
+            continue;
+        }
+        if !VALUED.contains(&name) {
             return invalid(format!("unknown option: --{name}"));
         }
         let Some(value) = inline.or_else(|| it.next().cloned()) else {
@@ -161,6 +190,13 @@ pub fn options(args: &[String]) -> Result<(Opts, Vec<String>)> {
                 o.fifo = Some(p);
             }
             "keep" => o.keep = num(&value, "keep")?,
+            "breaktrace" => {
+                let us: u64 = num(&value, "breaktrace threshold (us)")?;
+                if us == 0 {
+                    return invalid("--breaktrace needs a threshold above 0 us");
+                }
+                o.breaktrace_us = Some(us);
+            }
             _ => o.partner = Some(cpu_number(&value)?),
         }
     }
@@ -177,6 +213,8 @@ pub struct Config {
     pub fifo: Option<i32>,
     pub keep: usize,
     pub partner: Option<usize>, // --pingpong: no size argument then
+    pub tracemark: bool,
+    pub breaktrace_us: Option<u64>,
 }
 
 impl Config {
@@ -189,7 +227,7 @@ impl Config {
 // cpus, size (unless --pingpong), then the positional arguments that follow,
 // with the threshold at `thresh_pos` (counting the size slot either way)
 fn parse(args: &[String], thresh_pos: usize) -> Result<(Config, Vec<String>)> {
-    let (Opts { log, fifo, keep, partner }, mut pos) = options(args)?;
+    let (Opts { log, fifo, keep, partner, tracemark, breaktrace_us }, mut pos) = options(args)?;
     let cpus = parse_cpus(pos.first().ok_or(Error::Usage)?)?;
     let (size_str, size) = match partner {
         Some(p) => {
@@ -218,7 +256,13 @@ fn parse(args: &[String], thresh_pos: usize) -> Result<(Config, Vec<String>)> {
     if pos.len() > thresh_pos + 1 {
         return Err(Error::Usage);
     }
-    Ok((Config { cpus, size_str, size, thresh_ns, log, fifo, keep, partner }, pos))
+    // only outliers reach the trace: a lower threshold would never fire
+    if let Some(us) = breaktrace_us {
+        if us.saturating_mul(1000) < thresh_ns {
+            return invalid(format!("--breaktrace {us} us is below the outlier threshold of {thresh_ns} ns"));
+        }
+    }
+    Ok((Config { cpus, size_str, size, thresh_ns, log, fifo, keep, partner, tracemark, breaktrace_us }, pos))
 }
 
 // memlat benchmark ...: the config and the run time in seconds
@@ -330,12 +374,27 @@ mod tests {
     fn option_forms() {
         let (o, pos) = options(&args("2 --log out.csv 512K --fifo=5 60 --keep 10")).unwrap();
         assert_eq!(pos, ["2", "512K", "60"]);
-        assert_eq!(o, Opts { log: Some("out.csv".into()), fifo: Some(5), keep: 10, partner: None });
+        assert_eq!(o, Opts { log: Some("out.csv".into()), fifo: Some(5), keep: 10, ..Opts::default() });
+        let (o, pos) = options(&args("--tracemark 2 --breaktrace 50 512K")).unwrap();
+        assert_eq!(pos, ["2", "512K"]);
+        assert!(o.tracemark);
+        assert_eq!(o.breaktrace_us, Some(50));
         assert_eq!(options(&args("2 -h")), Err(Error::Help));
         assert_eq!(options(&args("--help")), Err(Error::Help));
         assert_eq!(options(&args("2 --version")), Err(Error::Version));
         assert_eq!(options(&args("-V")), Err(Error::Version));
-        for bad in ["--fifo 0", "--fifo 99", "--fifo x", "--keep -1", "--log", "--bogus 1", "--pingpong x"] {
+        for bad in [
+            "--fifo 0",
+            "--fifo 99",
+            "--fifo x",
+            "--keep -1",
+            "--log",
+            "--bogus 1",
+            "--pingpong x",
+            "--tracemark=1",
+            "--breaktrace 0",
+            "--breaktrace x",
+        ] {
             assert!(matches!(options(&args(bad)), Err(Error::Invalid(_))), "{bad}");
         }
     }
@@ -354,6 +413,15 @@ mod tests {
         for bad in ["2 64 60", "2 abc 60", "2 512K 0", "2 512K -1", "2 512K nan", "2 512K 60 x"] {
             assert!(matches!(benchmark(&args(bad)), Err(Error::Invalid(_))), "{bad}");
         }
+    }
+
+    #[test]
+    fn breaktrace_above_threshold() {
+        let (c, _) = benchmark(&args("2 512K 60 --breaktrace 50 --tracemark")).unwrap();
+        assert_eq!((c.breaktrace_us, c.tracemark), (Some(50), true));
+        assert!(benchmark(&args("2 512K 60 2000 --breaktrace 2")).is_ok());
+        let Err(Error::Invalid(m)) = benchmark(&args("2 512K 60 --breaktrace 1")) else { panic!() };
+        assert!(m.contains("below the outlier threshold"), "{m}");
     }
 
     #[test]

@@ -68,3 +68,17 @@ fn invalid_values_say_why() {
         assert!(stderr(&o).contains(msg), "{args}: {}", stderr(&o));
     }
 }
+
+// without root, ftrace is out of reach: say so before measuring anything
+#[test]
+fn ftrace_needs_access() {
+    // SAFETY: geteuid takes no arguments
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    for args in ["benchmark 0 512K 1 --tracemark", "top 0 512K --breaktrace 100"] {
+        let o = memlat(args);
+        assert_eq!(o.status.code(), Some(1), "{args}");
+        assert!(stderr(&o).contains("ftrace:"), "{args}: {}", stderr(&o));
+    }
+}

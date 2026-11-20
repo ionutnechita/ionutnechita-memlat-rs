@@ -3,7 +3,7 @@
 
 use crate::cli::Config;
 use crate::measure::{BUCKET_NS, Outlier, RunResult};
-use crate::{SETTLE_NS, STOP_CHECK_NS, analysis, irq, platform, top};
+use crate::{SETTLE_NS, STOP_CHECK_NS, analysis, irq, platform, top, trace};
 use std::fs::File;
 use std::io::{self, BufWriter, Write as _};
 
@@ -94,6 +94,22 @@ pub fn report(c: &Config, tpn: f64, runs: &[CpuRun], w: &Window, boost: Option<&
     match w.smi {
         (Some(a), Some(b)) => println!("\nSMIs during the run: {} (MSR_SMI_COUNT)", b.wrapping_sub(a)),
         _ => println!("\nSMIs during the run: unknown (needs root, the msr module and an Intel CPU)"),
+    }
+    if let Some(b) = trace::broke() {
+        println!(
+            "\nftrace stopped (--breaktrace {} us) by cpu {}: {:.3} us at CLOCK_MONOTONIC {}.{:06}",
+            c.breaktrace_us.unwrap_or(0),
+            b.cpu,
+            b.ns as f64 / 1e3,
+            b.sec,
+            b.nsec / 1000
+        );
+        println!(
+            "  the trace ends with what led up to it: {}/trace",
+            trace::tracefs().unwrap_or("<tracefs>")
+        );
+    } else if c.tracemark {
+        println!("\noutliers also written to the ftrace buffer (trace_marker)");
     }
     if let (Some(prio), Some(b)) = (c.fifo, boost) {
         println!("loop ran as SCHED_FIFO {prio}");
