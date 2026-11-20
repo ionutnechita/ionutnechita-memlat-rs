@@ -7,6 +7,7 @@
 // (round trip / 2) with the cost of reading the TSC removed, comparable to
 // nviennot/core-to-core-latency (MIT), whose method this follows.
 
+use crate::json::{Value, arr, obj};
 use crate::measure;
 use crate::pingpong::Shared;
 use crate::platform;
@@ -158,6 +159,41 @@ pub fn report(cpus: &[usize], samples: usize, pairs: &[Pair], overhead_ns: f64) 
     if platform::stop_requested() {
         println!("  (stopped: matrix incomplete)");
     }
+}
+
+// the whole matrix and the topology, for --json
+pub fn to_json(cpus: &[usize], samples: usize, pairs: &[Pair], overhead_ns: f64) -> Value {
+    let topo = cpus.iter().map(|&c| {
+        obj([
+            ("cpu", c.into()),
+            ("package", sysfs(c, "topology/physical_package_id").into()),
+            ("die", sysfs(c, "topology/die_id").into()),
+            ("core", sysfs(c, "topology/core_id").into()),
+            ("l3_id", sysfs(c, "cache/index3/id").into()),
+            ("l3_shared_with", sysfs(c, "cache/index3/shared_cpu_list").into()),
+        ])
+    });
+    let pairs = pairs.iter().map(|p| {
+        obj([
+            ("a", p.a.into()),
+            ("b", p.b.into()),
+            ("min_ns", p.min.into()),
+            ("median_ns", p.median.into()),
+            ("p99_ns", p.p99.into()),
+            ("max_ns", p.max.into()),
+        ])
+    });
+    obj([
+        ("memlat", env!("CARGO_PKG_VERSION").into()),
+        ("mode", "c2c".into()),
+        ("cpus", arr(cpus.iter().copied())),
+        ("round_trips_per_pair", samples.into()),
+        ("tsc_read_ns_removed", overhead_ns.into()),
+        ("one_way", "round trip / 2".into()),
+        ("stopped", platform::stop_requested().into()),
+        ("topology", Value::Arr(topo.collect())),
+        ("pairs", Value::Arr(pairs.collect())),
+    ])
 }
 
 pub fn write_csv(path: &str, pairs: &[Pair]) -> io::Result<()> {

@@ -53,6 +53,7 @@ mod analysis;
 mod c2c;
 mod cli;
 mod irq;
+mod json;
 mod measure;
 mod pingpong;
 mod platform;
@@ -449,7 +450,7 @@ fn top(prog: &str, a: &[String]) {
 }
 
 fn c2c(prog: &str, a: &[String]) {
-    let cli::C2c { cpus, samples, fifo, log } = or_exit(prog, cli::c2c(a));
+    let cli::C2c { cpus, samples, fifo, log, json } = or_exit(prog, cli::c2c(a));
     check_cpus(prog, &cpus);
     platform::warn_tsc();
     platform::install_signal_handlers();
@@ -457,10 +458,22 @@ fn c2c(prog: &str, a: &[String]) {
     let boost = fifo.map(|prio| platform::Boost::apply(&cpus, prio));
     let (pairs, overhead_ns) = c2c::run(&cpus, samples, fifo);
     drop(boost);
-    c2c::report(&cpus, samples, &pairs, overhead_ns);
+    // --json - puts the JSON alone on stdout
+    let text = json.as_deref() != Some("-");
+    if text {
+        c2c::report(&cpus, samples, &pairs, overhead_ns);
+    }
+    if let Some(path) = &json {
+        match json::save(path, &c2c::to_json(&cpus, samples, &pairs, overhead_ns)) {
+            Ok(()) if text => println!("\nmatrix written to {path} as JSON"),
+            Ok(()) => {}
+            Err(e) => eprintln!("\n{path}: {e}"),
+        }
+    }
     if let Some(path) = &log {
         match c2c::write_csv(path, &pairs) {
-            Ok(()) => println!("\n{} pairs written to {path}", pairs.len()),
+            Ok(()) if text => println!("\n{} pairs written to {path}", pairs.len()),
+            Ok(()) => {}
             Err(e) => eprintln!("\n{path}: {e}"),
         }
     }

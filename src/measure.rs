@@ -158,6 +158,16 @@ impl Pages {
         }
     }
 
+    // as given to --huge
+    pub fn name(self) -> &'static str {
+        match self {
+            Pages::Auto => "auto",
+            Pages::Huge2M => "2M",
+            Pages::Huge1G => "1G",
+            Pages::Small => "none",
+        }
+    }
+
     // explicit hugetlb page size, in bytes
     pub fn hugetlb(self) -> Option<usize> {
         match self {

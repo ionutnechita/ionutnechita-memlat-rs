@@ -84,3 +84,18 @@ fn ftrace_needs_access() {
         assert!(stderr(&o).contains("ftrace:"), "{args}: {}", stderr(&o));
     }
 }
+
+// --json - leaves stdout to the JSON alone (c2c: quick, no settle phase)
+#[test]
+fn json_on_stdout() {
+    if std::thread::available_parallelism().map_or(1, |n| n.get()) < 2 {
+        return;
+    }
+    let o = memlat("c2c 0,1 100 --json -");
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let out = stdout(&o);
+    assert!(out.starts_with("{\n") && out.ends_with("}\n"), "{out}");
+    assert!(out.contains("\"mode\": \"c2c\""), "{out}");
+    assert!(out.contains("\"median_ns\": "), "{out}");
+    assert!(!out.contains("closest  pair"), "text report mixed in: {out}");
+}

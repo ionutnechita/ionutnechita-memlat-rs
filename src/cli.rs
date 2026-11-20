@@ -35,7 +35,7 @@ pub fn help_text(prog: &str) -> String {
     {prog} benchmark <cpu> <seconds> [thresh_ns] --pingpong <partner> [options]
     {prog} top <cpu> [thresh_ns] --pingpong <partner> [options]
   core-to-core latency matrix (median and p99 per pair):
-    {prog} c2c <cpus> [round trips per pair] [--fifo PRIO] [--log FILE]
+    {prog} c2c <cpus> [round trips per pair] [--fifo PRIO] [--log FILE] [--json FILE]
 
   benchmark  runs for <seconds> and prints a report; several cpus run in parallel
   top        live view until q or Ctrl-C, then the same report
@@ -43,6 +43,8 @@ pub fn help_text(prog: &str) -> String {
 
 options:
   --log FILE       write every kept outlier to FILE as CSV
+  --json FILE      write the whole report to FILE as JSON; - for stdout,
+                   which then holds the JSON alone
   --fifo PRIO      run the loop as SCHED_FIFO PRIO (1-98); ktimers/N, irq_work/N
                    and rcuc/N of the measured cpus are lifted above it for the run
   --keep N         outliers kept per cpu (default {DEFAULT_KEEP})
@@ -135,6 +137,7 @@ pub struct Opts {
     pub breaktrace_us: Option<u64>,
     pub pages: Pages,
     pub mem_node: Option<usize>,
+    pub json: Option<String>,
 }
 
 impl Default for Opts {
@@ -148,13 +151,14 @@ impl Default for Opts {
             breaktrace_us: None,
             pages: Pages::Auto,
             mem_node: None,
+            json: None,
         }
     }
 }
 
 // options without a value
 const FLAGS: [&str; 1] = ["tracemark"];
-const VALUED: [&str; 7] = ["log", "fifo", "keep", "pingpong", "breaktrace", "huge", "mem-node"];
+const VALUED: [&str; 8] = ["log", "fifo", "keep", "pingpong", "breaktrace", "huge", "mem-node", "json"];
 
 // options may come anywhere; returns them and the positional arguments
 pub fn options(args: &[String]) -> Result<(Opts, Vec<String>)> {
@@ -190,6 +194,7 @@ pub fn options(args: &[String]) -> Result<(Opts, Vec<String>)> {
         };
         match name {
             "log" => o.log = Some(value),
+            "json" => o.json = Some(value),
             "fifo" => {
                 let p: i32 = num(&value, "fifo priority")?;
                 if !(1..=98).contains(&p) {
@@ -238,6 +243,7 @@ pub struct Config {
     pub breaktrace_us: Option<u64>,
     pub pages: Pages,
     pub mem_node: Option<usize>,
+    pub json: Option<String>,
 }
 
 impl Config {
@@ -250,7 +256,7 @@ impl Config {
 // cpus, size (unless --pingpong), then the positional arguments that follow,
 // with the threshold at `thresh_pos` (counting the size slot either way)
 fn parse(args: &[String], thresh_pos: usize) -> Result<(Config, Vec<String>)> {
-    let (Opts { log, fifo, keep, partner, tracemark, breaktrace_us, pages, mem_node }, mut pos) =
+    let (Opts { log, fifo, keep, partner, tracemark, breaktrace_us, pages, mem_node, json }, mut pos) =
         options(args)?;
     let cpus = parse_cpus(pos.first().ok_or(Error::Usage)?)?;
     let (size_str, size) = match partner {
@@ -303,6 +309,7 @@ fn parse(args: &[String], thresh_pos: usize) -> Result<(Config, Vec<String>)> {
             breaktrace_us,
             pages,
             mem_node,
+            json,
         },
         pos,
     ))
@@ -333,6 +340,7 @@ pub struct C2c {
     pub samples: usize,
     pub fifo: Option<i32>,
     pub log: Option<String>,
+    pub json: Option<String>,
 }
 
 // memlat c2c ...
@@ -349,7 +357,7 @@ pub fn c2c(args: &[String]) -> Result<C2c> {
     if pos.len() > 2 {
         return Err(Error::Usage);
     }
-    Ok(C2c { cpus, samples: samples.max(100), fifo: o.fifo, log: o.log })
+    Ok(C2c { cpus, samples: samples.max(100), fifo: o.fifo, log: o.log, json: o.json })
 }
 
 #[cfg(test)]
@@ -425,6 +433,7 @@ mod tests {
         assert_eq!(options(&args("--huge 1G")).unwrap().0.pages, Pages::Huge1G);
         assert_eq!(options(&args("--huge=none")).unwrap().0.pages, Pages::Small);
         assert_eq!(options(&args("--mem-node 1")).unwrap().0.mem_node, Some(1));
+        assert_eq!(options(&args("--json -")).unwrap().0.json.as_deref(), Some("-"));
         assert_eq!(options(&args("2 -h")), Err(Error::Help));
         assert_eq!(options(&args("--help")), Err(Error::Help));
         assert_eq!(options(&args("2 --version")), Err(Error::Version));
