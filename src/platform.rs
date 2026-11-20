@@ -183,6 +183,35 @@ impl Drop for Boost {
     }
 }
 
+// CPU flags a TSC-timed loop relies on: a TSC at a constant rate whatever
+// the core clock (constant_tsc) that keeps counting in deep C-states
+// (nonstop_tsc). Without them iteration times read from the TSC are wrong.
+const TSC_FLAGS: [&str; 2] = ["constant_tsc", "nonstop_tsc"];
+
+// TSC_FLAGS missing from the first "flags" line of /proc/cpuinfo; none if
+// there is no such line (nothing to go by)
+pub fn missing_tsc_flags(cpuinfo: &str) -> Vec<&'static str> {
+    let Some(flags) = cpuinfo.lines().find_map(|l| l.strip_prefix("flags")?.split_once(':').map(|(_, f)| f))
+    else {
+        return Vec::new();
+    };
+    let have: HashSet<&str> = flags.split_whitespace().collect();
+    TSC_FLAGS.into_iter().filter(|f| !have.contains(f)).collect()
+}
+
+pub fn warn_tsc() {
+    let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") else {
+        return;
+    };
+    let missing = missing_tsc_flags(&cpuinfo);
+    if !missing.is_empty() {
+        eprintln!(
+            "warning: the CPU does not report {}: times measured with the TSC may be wrong",
+            missing.join(", ")
+        );
+    }
+}
+
 const MSR_SMI_COUNT: u64 = 0x34;
 
 fn is_intel() -> bool {
@@ -206,4 +235,20 @@ pub fn smi_count() -> Option<u32> {
     let mut b = [0u8; 8];
     f.read_exact_at(&mut b, MSR_SMI_COUNT).ok()?;
     Some(u64::from_le_bytes(b) as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::missing_tsc_flags;
+
+    #[test]
+    fn tsc_flags() {
+        let ok = "processor\t: 0\nflags\t\t: fpu tsc constant_tsc rep_good nonstop_tsc cpuid\n";
+        assert!(missing_tsc_flags(ok).is_empty());
+        let vm = "processor\t: 0\nflags\t\t: fpu tsc constant_tsc cpuid\n";
+        assert_eq!(missing_tsc_flags(vm), ["nonstop_tsc"]);
+        let none = "flags\t\t: fpu tsc\n";
+        assert_eq!(missing_tsc_flags(none), ["constant_tsc", "nonstop_tsc"]);
+        assert!(missing_tsc_flags("processor\t: 0\n").is_empty());
+    }
 }

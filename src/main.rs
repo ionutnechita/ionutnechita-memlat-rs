@@ -109,7 +109,12 @@ fn pin(cpu: usize) {
 
 fn lock() {
     if let Err(e) = measure::lock_memory() {
-        eprintln!("mlockall (continuing without): {e}");
+        // ENOMEM / EPERM: over RLIMIT_MEMLOCK, or not allowed at all
+        let hint = match e.raw_os_error() {
+            Some(libc::ENOMEM | libc::EPERM) => "; run as root or raise the locked-memory limit (ulimit -l)",
+            _ => "",
+        };
+        eprintln!("mlockall (continuing without): {e}{hint}");
     }
 }
 
@@ -227,6 +232,7 @@ struct CpuRun {
 fn benchmark(prog: &str, a: &[String]) {
     let (c, secs) = or_exit(prog, cli::benchmark(a));
     check_cpus(prog, &c.all_cpus());
+    platform::warn_tsc();
     platform::install_signal_handlers();
     platform::avoid_cpus(&c.all_cpus());
     let tpn = measure::tsc_per_ns();
@@ -285,6 +291,7 @@ fn benchmark(prog: &str, a: &[String]) {
 fn top(prog: &str, a: &[String]) {
     let c = or_exit(prog, cli::top(a));
     check_cpus(prog, &c.all_cpus());
+    platform::warn_tsc();
     let cpu = c.cpus[0];
     platform::install_signal_handlers();
     let display = top::spawn_display(c.all_cpus(), cpu, c.size_str.clone(), c.thresh_ns, c.keep);
@@ -318,6 +325,7 @@ fn top(prog: &str, a: &[String]) {
 fn c2c(prog: &str, a: &[String]) {
     let cli::C2c { cpus, samples, fifo, log } = or_exit(prog, cli::c2c(a));
     check_cpus(prog, &cpus);
+    platform::warn_tsc();
     platform::install_signal_handlers();
     platform::avoid_cpus(&cpus);
     let boost = fifo.map(|prio| platform::Boost::apply(&cpus, prio));
