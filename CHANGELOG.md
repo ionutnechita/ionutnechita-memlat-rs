@@ -21,7 +21,9 @@ All notable changes to this project are documented here. The format follows
   node. The report says which node each buffer is on and whether it is the
   measured CPU's own.
 - `--json FILE` (or `-` for stdout) writes the whole report as JSON, for
-  `benchmark`, `top` and `c2c`.
+  `benchmark`, `top` and `c2c`, with a `schema` version for scripts.
+- README: how to read the report (interrupt sources and their remedies,
+  SMIs, periodic outliers, coincidences, core clock).
 
 ### Fixed
 
@@ -33,6 +35,8 @@ All notable changes to this project are documented here. The format follows
   failed.
 - In `benchmark` the SMI count now starts after the settle phase, so it
   covers the measurement alone.
+- CI: clippy lints are shown as annotations (they were hidden by color
+  codes), and the code is clean under `clippy -D warnings`.
 
 ## [0.1.1] - 2026-11-20
 
