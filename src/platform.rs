@@ -74,9 +74,18 @@ pub fn avoid_cpus(cpus: &[usize]) {
     }
 }
 
+// musl's sched_param has private padding fields after sched_priority, so it
+// cannot be built with a struct literal there
+fn sched_param(prio: libc::c_int) -> libc::sched_param {
+    // SAFETY: sched_param is plain integers, all-zero is a valid value
+    let mut sp: libc::sched_param = unsafe { mem::zeroed() };
+    sp.sched_priority = prio;
+    sp
+}
+
 // SCHED_FIFO for the calling thread
 pub fn set_fifo(prio: i32) -> io::Result<()> {
-    let param = libc::sched_param { sched_priority: prio };
+    let param = sched_param(prio);
     if unsafe { libc::sched_setscheduler(0, libc::SCHED_FIFO, &param) } != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -136,7 +145,7 @@ impl Boost {
                 b.notes.push(format!("{comm}: {} {cur}, already above the loop", policy_name(policy)));
                 continue;
             }
-            let sp = libc::sched_param { sched_priority: prio + 1 };
+            let sp = sched_param(prio + 1);
             if unsafe { libc::sched_setscheduler(pid, libc::SCHED_FIFO, &sp) } == 0 {
                 b.saved.push((pid, policy, cur));
                 b.notes.push(format!("{comm}: {} {cur} -> FIFO {}", policy_name(policy), prio + 1));
@@ -171,7 +180,7 @@ impl Boost {
     // or killed report cannot leave them raised
     pub fn restore(&mut self) {
         for (pid, policy, prio) in self.saved.drain(..) {
-            let sp = libc::sched_param { sched_priority: prio };
+            let sp = sched_param(prio);
             unsafe { libc::sched_setscheduler(pid, policy, &sp) };
         }
     }
