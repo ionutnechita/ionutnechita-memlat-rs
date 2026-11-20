@@ -1,6 +1,6 @@
 [package]
 name = "memlat"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Detect rare core stalls during memory accesses, cache-line round trips and core-to-core transfers on Linux x86_64"

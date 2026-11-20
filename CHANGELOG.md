@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-11-20
+
+### Fixed
+
+- The static musl build: `sched_param` is no longer built with a struct
+  literal, which does not compile against musl.
+- Buffers larger than the available memory are refused with a message
+  (MemAvailable plus free hugetlb pages) instead of getting the process
+  OOM-killed while they are populated.
+
+### Changed
+
+- The report lives in its own module (`report.rs`).
+- Every `unsafe` block documents why it is sound, enforced by clippy.
+- CI fails on clippy warnings and also runs the tests as a debug build;
+  Dependabot keeps the dependencies and actions up to date.
+
 ## [0.1.0] - 2026-11-20
 
 First public release.
@@ -28,4 +45,5 @@ First public release.
 - Unit and integration tests, CI (fmt, build, test, clippy, static musl
   build) and release binaries for x86_64 Linux.
 
+[0.1.1]: https://github.com/ionutnechita/ionutnechita-memlat-rs/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ionutnechita/ionutnechita-memlat-rs/releases/tag/v0.1.0
