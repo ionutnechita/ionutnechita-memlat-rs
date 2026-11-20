@@ -75,7 +75,7 @@ pub fn find(times: &[f64], max_pairs: usize) -> Vec<Grid> {
             None => grids.push(g),
         }
     }
-    grids.sort_by(|a, b| b.hits.cmp(&a.hits));
+    grids.sort_by_key(|g| std::cmp::Reverse(g.hits));
     grids
 }
 

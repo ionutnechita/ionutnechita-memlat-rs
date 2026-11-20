@@ -131,7 +131,7 @@ pub fn report(cpus: &[usize], samples: usize, pairs: &[Pair], overhead_ns: f64) 
         overhead_ns
     );
     println!("\ntopology (sysfs):");
-    println!("  {:>5} {:>8} {:>6} {:>6}  {}", "cpu", "package", "die", "core", "L3 id (shared with)");
+    println!("  {:>5} {:>8} {:>6} {:>6}  L3 id (shared with)", "cpu", "package", "die", "core");
     for &c in cpus {
         println!(
             "  {:>5} {:>8} {:>6} {:>6}  {} ({})",

@@ -83,6 +83,8 @@ pub struct Ping<'a> {
 
 impl Work for Ping<'_> {
     #[inline(always)]
+    // no spin_loop() (PAUSE) in the wait: see the top of this file
+    #[allow(clippy::missing_spin_loop)]
     fn step(&mut self) -> u64 {
         self.v += 1;
         self.s.ping.0.store(self.v, Release);

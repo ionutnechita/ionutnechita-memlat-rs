@@ -10,7 +10,7 @@
 use crate::analysis;
 use crate::measure::{NBUCKETS, Outlier, Sink, Stats, clock};
 use crate::platform;
-use crate::view::{Header, Sample, Totals, View};
+use crate::view::{Frame, Header, Sample, Totals, View};
 use std::collections::VecDeque;
 use std::io::{self, Write as _};
 use std::sync::OnceLock;
@@ -306,7 +306,11 @@ fn display(avoid: &[usize], cpu: usize, size: &str, thresh_ns: u64, keep: usize)
     let _ = write!(stdout, "\x1b[?1049h\x1b[?25l");
     let started = Instant::now();
     let (mut prev, mut prev_t) = (snapshot(), started);
-    view.render(&mut out, &h, &totals(&prev), Duration::ZERO, &[], paused, &status);
+    view.render(
+        &mut out,
+        &h,
+        &Frame { tot: &totals(&prev), up: Duration::ZERO, recent: &[], paused, status: &status },
+    );
     let _ = stdout.write_all(out.as_bytes());
     let _ = stdout.flush();
     while !stopped() {
@@ -354,7 +358,11 @@ fn display(avoid: &[usize], cpu: usize, size: &str, thresh_ns: u64, keep: usize)
         }
         if !paused || toggled {
             let up = prev_t - started;
-            view.render(&mut out, &h, &totals(&prev), up, &recent(RING), paused, &status);
+            view.render(
+                &mut out,
+                &h,
+                &Frame { tot: &totals(&prev), up, recent: &recent(RING), paused, status: &status },
+            );
             let _ = stdout.write_all(out.as_bytes());
             let _ = stdout.flush();
         }

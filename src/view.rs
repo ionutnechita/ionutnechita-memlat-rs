@@ -40,6 +40,16 @@ pub struct Sample {
     pub dt: f64,
 }
 
+// what one screen shows besides the header
+#[derive(Clone, Copy)]
+pub struct Frame<'a> {
+    pub tot: &'a Totals,
+    pub up: Duration,
+    pub recent: &'a [Outlier], // newest first
+    pub paused: bool,
+    pub status: &'a str, // SMI count, live period, outliers not kept
+}
+
 pub struct Totals {
     pub hist: [u64; NBUCKETS],
     pub iters: u64,
@@ -216,16 +226,8 @@ impl View {
         self.samples.iter().skip(self.samples.len().saturating_sub(n))
     }
 
-    pub fn render(
-        &self,
-        out: &mut String,
-        h: &Header,
-        tot: &Totals,
-        up: Duration,
-        recent: &[Outlier],
-        paused: bool,
-        status: &str,
-    ) {
+    pub fn render(&self, out: &mut String, h: &Header, f: &Frame) {
+        let (tot, recent) = (f.tot, f.recent);
         let (cols, rows) = term_size();
         // leave the last column empty: writing it puts the terminal in
         // pending-wrap state and the following erase-to-EOL would clear it
@@ -249,7 +251,7 @@ impl View {
 
         out.clear();
         out.push_str("\x1b[H");
-        self.header(out, h, tot, up, cols, paused, status);
+        self.header(out, h, f, cols);
         eol(out);
         self.histogram(out, h, tot, cols);
         if mrows > 0 {
@@ -278,16 +280,8 @@ impl View {
         self.pen.reset(out);
     }
 
-    fn header(
-        &self,
-        out: &mut String,
-        h: &Header,
-        tot: &Totals,
-        up: Duration,
-        cols: usize,
-        paused: bool,
-        status: &str,
-    ) {
+    fn header(&self, out: &mut String, h: &Header, f: &Frame, cols: usize) {
+        let Frame { tot, up, paused, status, .. } = *f;
         let pen = self.pen;
         let e = up.as_secs();
         let what = if h.lines == 0 { h.size.to_string() } else { format!("{} {}", h.size, h.pages) };
