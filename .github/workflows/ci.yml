@@ -28,12 +28,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
-          components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked
       # core_probe_stable is #[ignore]d: it needs a quiet machine
       - run: cargo test --release --locked
-      - run: cargo clippy --release --all-targets --locked
+      # debug builds keep the overflow checks
+      - run: cargo test --locked
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # every lint fails the job and shows up as an annotation on the line
+      - name: cargo clippy
+        run: |
+          set -o pipefail
+          cargo clippy --all-targets --locked --message-format=short -- -D warnings 2>&1 |
+            sed -E 's/^([^: ]+\.rs):([0-9]+):([0-9]+): (warning|error): (.*)$/::error file=\1,line=\2,col=\3::\5/'
 
   musl:
     runs-on: ubuntu-latest
