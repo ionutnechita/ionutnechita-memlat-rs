@@ -178,7 +178,9 @@ fn mark(c: u64) -> (char, &'static str) {
 }
 
 fn term_size() -> (usize, usize) {
+    // SAFETY: winsize is plain integers, all-zero is valid
     let mut ws: libc::winsize = unsafe { mem::zeroed() };
+    // SAFETY: TIOCGWINSZ writes one winsize into ws
     if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) } == 0 && ws.ws_col > 0 {
         (ws.ws_col as usize, ws.ws_row as usize)
     } else {
@@ -198,6 +200,7 @@ pub struct View {
 
 impl View {
     pub fn new() -> View {
+        // SAFETY: isatty takes no pointers
         let color = env::var_os("NO_COLOR").is_none() && unsafe { libc::isatty(1) } == 1;
         View { samples: VecDeque::with_capacity(HISTORY), pen: Pen { color } }
     }

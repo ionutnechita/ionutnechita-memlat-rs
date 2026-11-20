@@ -375,6 +375,8 @@ struct Keys(Option<libc::termios>);
 
 impl Keys {
     fn new() -> Keys {
+        // SAFETY: termios is plain integers (all-zero is valid) and is only passed
+        // to tcgetattr / tcsetattr on stdin, which is checked to be a terminal
         unsafe {
             let mut t: libc::termios = std::mem::zeroed();
             if libc::isatty(libc::STDIN_FILENO) != 1 || libc::tcgetattr(libc::STDIN_FILENO, &mut t) != 0 {
@@ -396,10 +398,12 @@ impl Keys {
             return None;
         }
         let mut pfd = libc::pollfd { fd: libc::STDIN_FILENO, events: libc::POLLIN, revents: 0 };
+        // SAFETY: one valid pollfd, count 1
         if unsafe { libc::poll(&mut pfd, 1, timeout.as_millis() as libc::c_int) } <= 0 {
             return None;
         }
         let mut b = 0u8;
+        // SAFETY: reads at most 1 byte into b
         let n = unsafe { libc::read(libc::STDIN_FILENO, (&raw mut b).cast(), 1) };
         (n == 1).then_some(b)
     }
@@ -408,6 +412,7 @@ impl Keys {
 impl Drop for Keys {
     fn drop(&mut self) {
         if let Some(t) = &self.0 {
+            // SAFETY: t holds the settings tcgetattr returned for stdin
             unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, t) };
         }
     }

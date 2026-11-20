@@ -25,6 +25,7 @@ extern "C" fn on_signal(_: libc::c_int) {
 
 pub fn install_signal_handlers() {
     let handler = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    // SAFETY: the handler only stores to an atomic, which is async-signal-safe
     unsafe {
         libc::signal(libc::SIGINT, handler);
         libc::signal(libc::SIGTERM, handler);
@@ -33,6 +34,7 @@ pub fn install_signal_handlers() {
 
 // once the measurement is over: Ctrl-C ends the report at once
 pub fn default_signals() {
+    // SAFETY: restores the default disposition, no handler involved
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_DFL);
         libc::signal(libc::SIGTERM, libc::SIG_DFL);
@@ -41,6 +43,7 @@ pub fn default_signals() {
 
 // for measurement threads: signals go to the other threads instead
 pub fn block_signals() {
+    // SAFETY: sigset_t is filled by sigfillset before use; null for the old mask
     unsafe {
         let mut set: libc::sigset_t = mem::zeroed();
         libc::sigfillset(&mut set);
@@ -56,6 +59,8 @@ pub fn online_cpus() -> Option<Vec<usize>> {
 
 // keeps the calling thread off `cpus`
 pub fn avoid_cpus(cpus: &[usize]) {
+    // SAFETY: cpu_set_t is a plain bit array of size sz; CPU_CLR only sees CPUs
+    // below CPU_SETSIZE
     unsafe {
         let mut set: libc::cpu_set_t = mem::zeroed();
         let sz = mem::size_of::<libc::cpu_set_t>();
@@ -86,6 +91,7 @@ fn sched_param(prio: libc::c_int) -> libc::sched_param {
 // SCHED_FIFO for the calling thread
 pub fn set_fifo(prio: i32) -> io::Result<()> {
     let param = sched_param(prio);
+    // SAFETY: param is a valid sched_param; pid 0 is the calling thread
     if unsafe { libc::sched_setscheduler(0, libc::SCHED_FIFO, &param) } != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -135,6 +141,8 @@ impl Boost {
                 continue;
             }
             seen.insert(comm.clone());
+            // SAFETY: sp is a valid sched_param to write into; a pid that has exited
+            // only makes the calls fail
             let (policy, cur) = unsafe {
                 let mut sp: libc::sched_param = mem::zeroed();
                 libc::sched_getparam(pid, &mut sp);
@@ -146,6 +154,7 @@ impl Boost {
                 continue;
             }
             let sp = sched_param(prio + 1);
+            // SAFETY: sp is a valid sched_param
             if unsafe { libc::sched_setscheduler(pid, libc::SCHED_FIFO, &sp) } == 0 {
                 b.saved.push((pid, policy, cur));
                 b.notes.push(format!("{comm}: {} {cur} -> FIFO {}", policy_name(policy), prio + 1));
@@ -181,6 +190,7 @@ impl Boost {
     pub fn restore(&mut self) {
         for (pid, policy, prio) in self.saved.drain(..) {
             let sp = sched_param(prio);
+            // SAFETY: sp is a valid sched_param
             unsafe { libc::sched_setscheduler(pid, policy, &sp) };
         }
     }
@@ -236,6 +246,7 @@ pub fn smi_count() -> Option<u32> {
     if !is_intel() {
         return None;
     }
+    // SAFETY: sched_getcpu takes no arguments
     let cpu = unsafe { libc::sched_getcpu() };
     if cpu < 0 {
         return None;

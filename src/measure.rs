@@ -22,6 +22,7 @@ pub const NBUCKETS: usize = BUCKET_NS.len();
 pub fn clock(id: libc::clockid_t) -> libc::timespec {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     // clock_gettime goes through the vDSO: no syscall, safe to call in the loop
+    // SAFETY: ts is a valid, writable timespec
     unsafe { libc::clock_gettime(id, &mut ts) };
     ts
 }
@@ -33,12 +34,14 @@ fn now_s() -> f64 {
 
 #[inline(always)]
 fn rdtsc() -> u64 {
+    // SAFETY: rdtsc is available on every x86_64 CPU and has no memory effects
     unsafe { _rdtsc() }
 }
 
 // TSC read once all earlier instructions have completed
 #[inline(always)]
 pub fn fenced_tsc() -> u64 {
+    // SAFETY: lfence is part of SSE2, which every x86_64 CPU has
     unsafe { _mm_lfence() };
     rdtsc()
 }
@@ -68,6 +71,8 @@ const PROBE_UNITS: u64 = 40; // x 100 adds: ~1.2 us at 3.3 GHz
 #[inline(always)]
 fn add_chain(units: u64) {
     let mut x = 0u64;
+    // SAFETY: register-only arithmetic (nomem, nostack); every register it
+    // changes is declared as an output
     unsafe {
         asm!(
             "2:",
@@ -140,14 +145,17 @@ impl Mapping {
         let prot = libc::PROT_READ | libc::PROT_WRITE;
         let flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_POPULATE;
         // try hugetlb pages first to take the TLB out of the picture
+        // SAFETY: a new anonymous mapping, it aliases nothing; MAP_FAILED is checked
         let p = unsafe { libc::mmap(ptr::null_mut(), size, prot, flags | libc::MAP_HUGETLB, -1, 0) };
         if p != libc::MAP_FAILED {
             return Ok(Mapping { ptr: p.cast(), size, lines, huge: true });
         }
+        // SAFETY: as above
         let p = unsafe { libc::mmap(ptr::null_mut(), size, prot, flags, -1, 0) };
         if p == libc::MAP_FAILED {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: p..p+size is the mapping just made; madvise is only a hint
         unsafe { libc::madvise(p, size, libc::MADV_HUGEPAGE) };
         Ok(Mapping { ptr: p.cast(), size, lines, huge: false })
     }
@@ -155,6 +163,9 @@ impl Mapping {
     // single random cycle over all cache lines (Sattolo's algorithm)
     pub fn build_cycle(&mut self) {
         let n = self.lines;
+        // SAFETY: the mapping holds `lines` Nodes (size / LINE, 64-byte aligned since
+        // mmap returns page-aligned memory), it is readable and writable, and the
+        // &mut self borrow keeps any Chase from reading it meanwhile
         let nodes = unsafe { std::slice::from_raw_parts_mut(self.ptr, n) };
         let mut perm: Vec<u64> = (0..n as u64).collect();
         let mut rng = Rng(88172645463325252);
@@ -195,7 +206,9 @@ impl Mapping {
 impl Work for Chase<'_> {
     #[inline(always)]
     fn step(&mut self) -> u64 {
-        // SAFETY: idx always comes from the Sattolo cycle, so it is < lines
+        // SAFETY: idx is a `next` read from the buffer, always < lines: zero from
+        // mmap, then a Sattolo permutation index; the borrow of the Mapping
+        // keeps it mapped
         self.idx = unsafe { ptr::read_volatile(&(*self.base.add(self.idx as usize)).next) };
         self.idx
     }
@@ -203,6 +216,7 @@ impl Work for Chase<'_> {
 
 impl Drop for Mapping {
     fn drop(&mut self) {
+        // SAFETY: the mapping made in new(); no Chase outlives it (they borrow it)
         unsafe { libc::munmap(self.ptr.cast(), self.size) };
     }
 }
@@ -213,6 +227,8 @@ pub fn pin_to_cpu(cpu: usize) -> io::Result<()> {
     if cpu >= libc::CPU_SETSIZE as usize {
         return Err(io::Error::from_raw_os_error(libc::EINVAL));
     }
+    // SAFETY: cpu_set_t is a plain bit array, all-zero is an empty set; cpu is
+    // below CPU_SETSIZE (checked above), so CPU_SET stays inside it
     unsafe {
         let mut set: libc::cpu_set_t = mem::zeroed();
         libc::CPU_SET(cpu, &mut set);
@@ -226,6 +242,7 @@ pub fn pin_to_cpu(cpu: usize) -> io::Result<()> {
 // MCL_CURRENT only: as non-root, MCL_FUTURE + RLIMIT_MEMLOCK would make later
 // mmaps fail, so call this after everything the loop touches is allocated
 pub fn lock_memory() -> io::Result<()> {
+    // SAFETY: mlockall takes no pointers
     if unsafe { libc::mlockall(libc::MCL_CURRENT) } != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -312,8 +329,7 @@ pub fn run<W: Work, S: Sink>(work: &mut W, p: &Params, sink: &mut S) -> RunResul
     // --- measurement loop: no allocations, no bounds checks, no panics ---
     loop {
         idx = work.step();
-        unsafe { _mm_lfence() }; // wait for the step before rdtsc
-        let t = rdtsc();
+        let t = fenced_tsc(); // waits for the step before reading the TSC
         let d = t.wrapping_sub(prev);
 
         prev = t;
@@ -338,7 +354,7 @@ pub fn run<W: Work, S: Sink>(work: &mut W, p: &Params, sink: &mut S) -> RunResul
             });
             st.nout += 1;
             // the bookkeeping above is not part of the next interval
-            prev = unsafe { _rdtsc() };
+            prev = rdtsc();
         }
         if t >= next_check {
             st.max_d = st.max_d.max(win_max);
@@ -349,7 +365,7 @@ pub fn run<W: Work, S: Sink>(work: &mut W, p: &Params, sink: &mut S) -> RunResul
             }
             win_max = 0;
             next_check = end_tsc.min(t.saturating_add(p.publish_tsc));
-            prev = unsafe { _rdtsc() };
+            prev = rdtsc();
         }
     }
 
@@ -450,6 +466,7 @@ mod tests {
     #[test]
     #[ignore = "needs a quiet machine with a steady core clock"]
     fn core_probe_stable() {
+        // SAFETY: sched_getcpu takes no arguments
         let cpu = unsafe { libc::sched_getcpu() };
         assert!(cpu >= 0);
         super::pin_to_cpu(cpu as usize).expect("pin");

@@ -40,6 +40,10 @@
 //   e.g. memlat benchmark 61 512K 60 ; memlat benchmark 2,40 16G 60 --fifo 1
 //        memlat top 61 16M --log out.csv
 
+#![deny(unsafe_op_in_unsafe_fn)]
+// every unsafe block says why it is sound (checked by clippy in CI)
+#![warn(clippy::undocumented_unsafe_blocks)]
+
 // The loop times every iteration with lfence + rdtsc and relies on Linux
 // (sched_setaffinity, mlockall, MAP_HUGETLB, /proc, /dev/cpu/N/msr).
 #[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
