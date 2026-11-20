@@ -48,6 +48,12 @@ pub fn block_signals() {
     }
 }
 
+// CPUs listed in /sys/devices/system/cpu/online, None if unreadable
+pub fn online_cpus() -> Option<Vec<usize>> {
+    let s = fs::read_to_string("/sys/devices/system/cpu/online").ok()?;
+    crate::cli::parse_cpus(s.trim()).ok()
+}
+
 // keeps the calling thread off `cpus`
 pub fn avoid_cpus(cpus: &[usize]) {
     unsafe {
@@ -56,7 +62,8 @@ pub fn avoid_cpus(cpus: &[usize]) {
         if libc::sched_getaffinity(0, sz, &mut set) != 0 {
             return;
         }
-        for &c in cpus {
+        // CPU_CLR() panics past the end of the set
+        for &c in cpus.iter().filter(|&&c| c < crate::cli::MAX_CPUS) {
             libc::CPU_CLR(c, &mut set);
         }
         if libc::CPU_COUNT(&set) == 0 {

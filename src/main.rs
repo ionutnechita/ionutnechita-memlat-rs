@@ -35,7 +35,8 @@
 //        memlat c2c <cpus> [round trips per pair] [--fifo PRIO] [--log FILE]
 //          core-to-core latency matrix (median and p99), see c2c.rs
 //   options: --log FILE (CSV of all kept outliers), --fifo PRIO (SCHED_FIFO
-//            loop, per-CPU kthreads lifted above it), --keep N (outliers kept)
+//            loop, per-CPU kthreads lifted above it), --keep N (outliers kept),
+//            -V / --version
 //   e.g. memlat benchmark 61 512K 60 ; memlat benchmark 2,40 16G 60 --fifo 1
 //        memlat top 61 16M --log out.csv
 
@@ -46,215 +47,58 @@ compile_error!("memlat supports only Linux on x86_64 (it times iterations with t
 
 mod analysis;
 mod c2c;
+mod cli;
 mod measure;
 mod pingpong;
 mod platform;
 mod top;
 mod view;
 
-use measure::{BUCKET_NS, LINE, Mapping, Outlier, Params, RunResult, Sink, Stats};
+use cli::Config;
+use measure::{BUCKET_NS, Mapping, Outlier, Params, RunResult, Sink, Stats};
 use std::fs::File;
 use std::io::{self, BufWriter, Write as _};
 use std::sync::{Arc, Barrier};
 use std::{env, process, thread};
 
-const DEFAULT_KEEP: usize = 1 << 16;
 const PRINT_OUTLIERS: usize = 200;
-const DEFAULT_THRESH_NS: u64 = 3000;
 const STOP_CHECK_NS: f64 = 100e6; // benchmark: how often Ctrl-C is noticed
 const SETTLE_NS: f64 = 2e9;
 const COINCIDENCE_NS: f64 = 10e3;
 const PRINT_COINCIDENCES: usize = 20;
 const PRINT_PHASES: usize = 8;
-const C2C_SAMPLES: usize = 20_000;
 
-fn help_text(prog: &str) -> String {
-    let prog = prog.rsplit('/').next().unwrap_or(prog);
-    format!(
-        "usage:
-  time memory accesses (pointer chase over a buffer in L2 / L3 / DRAM):
-    {prog} benchmark <cpu[,cpu...]> <size[K|M|G]> <seconds> [thresh_ns] [options]
-    {prog} top <cpu> <size[K|M|G]> [thresh_ns] [options]
-  time cache-line round trips to a partner cpu (coherence fabric, both cpus):
-    {prog} benchmark <cpu> <seconds> [thresh_ns] --pingpong <partner> [options]
-    {prog} top <cpu> [thresh_ns] --pingpong <partner> [options]
-  core-to-core latency matrix (median and p99 per pair):
-    {prog} c2c <cpus> [round trips per pair] [--fifo PRIO] [--log FILE]
-
-  benchmark  runs for <seconds> and prints a report; several cpus run in parallel
-  top        live view until q or Ctrl-C, then the same report
-  cpus       list and ranges, e.g. 2,40 or 2-5; thresh_ns default {DEFAULT_THRESH_NS}
-
-options:
-  --log FILE       write every kept outlier to FILE as CSV
-  --fifo PRIO      run the loop as SCHED_FIFO PRIO (1-98); ktimers/N, irq_work/N
-                   and rcuc/N of the measured cpus are lifted above it for the run
-  --keep N         outliers kept per cpu (default {DEFAULT_KEEP})
-  --pingpong CPU   partner cpu for the round-trip mode
-  -h, --help       this text"
-    )
+// the parsed arguments, or the help text / message and exit code for them
+fn or_exit<T>(prog: &str, r: cli::Result<T>) -> T {
+    match r {
+        Ok(v) => v,
+        Err(cli::Error::Help) => {
+            println!("{}", cli::help_text(prog));
+            process::exit(0);
+        }
+        Err(cli::Error::Version) => {
+            println!("{}", cli::version_text());
+            process::exit(0);
+        }
+        Err(cli::Error::Usage) => {
+            eprintln!("{}", cli::help_text(prog));
+            process::exit(1);
+        }
+        Err(cli::Error::Invalid(msg)) => {
+            eprintln!("{msg}");
+            process::exit(1);
+        }
+    }
 }
 
-// wrong arguments: help on stderr, exit 1
-fn usage(prog: &str) -> ! {
-    eprintln!("{}", help_text(prog));
-    process::exit(1);
-}
-
-fn help(prog: &str) -> ! {
-    println!("{}", help_text(prog));
-    process::exit(0);
+// CPUs that are not online make sched_setaffinity fail deep in a thread
+fn check_cpus(prog: &str, cpus: &[usize]) {
+    or_exit(prog, cli::check_online(cpus, platform::online_cpus().as_deref()));
 }
 
 fn die(msg: &str, err: io::Error) -> ! {
     eprintln!("{msg}: {err}");
     process::exit(1);
-}
-
-fn parse_size(s: &str) -> Option<u64> {
-    let digits = s.trim_end_matches(|c: char| c.is_ascii_alphabetic());
-    let v: u64 = digits.parse().ok()?;
-    match &s[digits.len()..] {
-        "k" | "K" => Some(v << 10),
-        "m" | "M" => Some(v << 20),
-        "g" | "G" => Some(v << 30),
-        "" => Some(v),
-        _ => None,
-    }
-}
-
-// "2,40" or "2-5,8", in the given order without duplicates
-fn parse_cpus(s: &str) -> Option<Vec<usize>> {
-    let mut v = Vec::new();
-    for part in s.split(',') {
-        let (lo, hi) = match part.split_once('-') {
-            Some((a, b)) => (a.parse().ok()?, b.parse().ok()?),
-            None => {
-                let c = part.parse().ok()?;
-                (c, c)
-            }
-        };
-        if lo > hi {
-            return None;
-        }
-        for c in lo..=hi {
-            if !v.contains(&c) {
-                v.push(c);
-            }
-        }
-    }
-    Some(v)
-}
-
-fn num<T: std::str::FromStr>(s: &str, what: &str) -> T {
-    s.parse().unwrap_or_else(|_| {
-        eprintln!("invalid {what}: {s}");
-        process::exit(1);
-    })
-}
-
-fn arg<T: std::str::FromStr>(prog: &str, s: Option<&String>, what: &str) -> T {
-    let Some(s) = s else { usage(prog) };
-    num(s, what)
-}
-
-struct Config {
-    cpus: Vec<usize>,
-    size_str: String,
-    size: usize,
-    thresh_ns: u64,
-    log: Option<String>,
-    fifo: Option<i32>,
-    keep: usize,
-    partner: Option<usize>, // --pingpong: no size argument then
-}
-
-impl Config {
-    // measured CPUs plus the ping-pong partner
-    fn all_cpus(&self) -> Vec<usize> {
-        self.cpus.iter().copied().chain(self.partner).collect()
-    }
-}
-
-struct Opts {
-    log: Option<String>,
-    fifo: Option<i32>,
-    keep: usize,
-    partner: Option<usize>,
-}
-
-// options may come anywhere; returns them and the positional arguments
-fn options(prog: &str, args: &[String]) -> (Opts, Vec<String>) {
-    let mut pos = Vec::new();
-    let (mut log, mut fifo, mut keep, mut partner) = (None, None, DEFAULT_KEEP, None);
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if a == "-h" || a == "--help" {
-            help(prog);
-        }
-        let Some(opt) = a.strip_prefix("--") else {
-            pos.push(a.clone());
-            continue;
-        };
-        let (name, inline) = match opt.split_once('=') {
-            Some((n, v)) => (n, Some(v.to_string())),
-            None => (opt, None),
-        };
-        let value = inline.or_else(|| it.next().cloned()).unwrap_or_else(|| usage(prog));
-        match name {
-            "log" => log = Some(value),
-            "fifo" => {
-                let p: i32 = num(&value, "fifo priority");
-                if !(1..=98).contains(&p) {
-                    eprintln!("fifo priority must be 1-98");
-                    process::exit(1);
-                }
-                fifo = Some(p);
-            }
-            "keep" => keep = num(&value, "keep"),
-            "pingpong" => partner = Some(num(&value, "partner cpu")),
-            _ => usage(prog),
-        }
-    }
-    (Opts { log, fifo, keep, partner }, pos)
-}
-
-fn parse(prog: &str, args: &[String], thresh_pos: usize) -> (Config, Vec<String>) {
-    let (Opts { log, fifo, keep, partner }, pos) = options(prog, args);
-
-    let cpus = pos.first().map_or_else(|| usage(prog), |s| parse_cpus(s)).unwrap_or_else(|| {
-        eprintln!("invalid cpu list: {}", pos[0]);
-        process::exit(1);
-    });
-    let (size_str, size, pos) = match partner {
-        Some(p) => {
-            if cpus.len() != 1 || cpus[0] == p {
-                eprintln!("--pingpong needs one measured cpu and a different partner cpu");
-                process::exit(1);
-            }
-            // no size argument: keep the positions of the others
-            let mut pos = pos;
-            pos.insert(1, String::new());
-            (format!("pingpong with cpu {p}"), 0, pos)
-        }
-        None => {
-            let size_str = pos.get(1).cloned().unwrap_or_else(|| usage(prog));
-            let size = parse_size(&size_str).unwrap_or_else(|| {
-                eprintln!("invalid size: {size_str}");
-                process::exit(1);
-            }) as usize;
-            if size / LINE < 2 {
-                eprintln!("size too small: minimum {} bytes", 2 * LINE);
-                process::exit(1);
-            }
-            (size_str, size, pos)
-        }
-    };
-    let thresh_ns = match pos.get(thresh_pos) {
-        Some(s) => num(s, "thresh_ns"),
-        None => DEFAULT_THRESH_NS,
-    };
-    (Config { cpus, size_str, size, thresh_ns, log, fifo, keep, partner }, pos)
 }
 
 fn pin(cpu: usize) {
@@ -381,8 +225,8 @@ struct CpuRun {
 }
 
 fn benchmark(prog: &str, a: &[String]) {
-    let (c, pos) = parse(prog, a, 3);
-    let secs: f64 = arg(prog, pos.get(2), "seconds");
+    let (c, secs) = or_exit(prog, cli::benchmark(a));
+    check_cpus(prog, &c.all_cpus());
     platform::install_signal_handlers();
     platform::avoid_cpus(&c.all_cpus());
     let tpn = measure::tsc_per_ns();
@@ -439,11 +283,9 @@ fn benchmark(prog: &str, a: &[String]) {
 }
 
 fn top(prog: &str, a: &[String]) {
-    let (c, _) = parse(prog, a, 2);
-    let [cpu] = c.cpus[..] else {
-        eprintln!("top measures one cpu");
-        process::exit(1);
-    };
+    let c = or_exit(prog, cli::top(a));
+    check_cpus(prog, &c.all_cpus());
+    let cpu = c.cpus[0];
     platform::install_signal_handlers();
     let display = top::spawn_display(c.all_cpus(), cpu, c.size_str.clone(), c.thresh_ns, c.keep);
     platform::block_signals();
@@ -474,23 +316,15 @@ fn top(prog: &str, a: &[String]) {
 }
 
 fn c2c(prog: &str, a: &[String]) {
-    let (o, pos) = options(prog, a);
-    let cpus = pos.first().and_then(|s| parse_cpus(s)).unwrap_or_else(|| usage(prog));
-    if cpus.len() < 2 {
-        eprintln!("c2c needs at least two cpus");
-        process::exit(1);
-    }
-    let samples = match pos.get(1) {
-        Some(s) => num(s, "samples"),
-        None => C2C_SAMPLES,
-    };
+    let cli::C2c { cpus, samples, fifo, log } = or_exit(prog, cli::c2c(a));
+    check_cpus(prog, &cpus);
     platform::install_signal_handlers();
     platform::avoid_cpus(&cpus);
-    let boost = o.fifo.map(|prio| platform::Boost::apply(&cpus, prio));
-    let (pairs, overhead_ns) = c2c::run(&cpus, samples.max(100), o.fifo);
+    let boost = fifo.map(|prio| platform::Boost::apply(&cpus, prio));
+    let (pairs, overhead_ns) = c2c::run(&cpus, samples, fifo);
     drop(boost);
-    c2c::report(&cpus, samples.max(100), &pairs, overhead_ns);
-    if let Some(path) = &o.log {
+    c2c::report(&cpus, samples, &pairs, overhead_ns);
+    if let Some(path) = &log {
         match c2c::write_csv(path, &pairs) {
             Ok(()) => println!("\n{} pairs written to {path}", pairs.len()),
             Err(e) => eprintln!("\n{path}: {e}"),
@@ -732,9 +566,10 @@ fn main() {
         Some("benchmark") => benchmark(prog, &args[2..]),
         Some("top") => top(prog, &args[2..]),
         Some("c2c") => c2c(prog, &args[2..]),
-        Some("-h" | "--help" | "help") => help(prog),
+        Some("-h" | "--help" | "help") => or_exit(prog, Err(cli::Error::Help)),
+        Some("-V" | "--version" | "version") => or_exit(prog, Err(cli::Error::Version)),
         // old form without a subcommand: memlat <cpu> <size> <seconds> [thresh_ns]
         Some(a) if a.parse::<usize>().is_ok() => benchmark(prog, &args[1..]),
-        _ => usage(prog),
+        _ => or_exit(prog, Err(cli::Error::Usage)),
     }
 }

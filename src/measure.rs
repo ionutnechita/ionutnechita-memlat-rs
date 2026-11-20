@@ -209,6 +209,10 @@ impl Drop for Mapping {
 
 // pins the calling thread
 pub fn pin_to_cpu(cpu: usize) -> io::Result<()> {
+    // CPU_SET() panics past the end of the set
+    if cpu >= libc::CPU_SETSIZE as usize {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
     unsafe {
         let mut set: libc::cpu_set_t = mem::zeroed();
         libc::CPU_SET(cpu, &mut set);
