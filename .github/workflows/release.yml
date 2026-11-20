@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-unknown-linux-musl
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the crate version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "${GITHUB_REF_NAME}" = "v${version}" || {
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}"; exit 1; }
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo test --release --locked
+      - run: cargo build --release --locked --target "$TARGET"
+      - name: Package
+        run: |
+          name="memlat-${GITHUB_REF_NAME}-x86_64-linux-musl"
+          mkdir "$name"
+          cp "target/$TARGET/release/memlat" README.md CHANGELOG.md LICENSE "$name/"
+          tar czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            memlat-*.tar.gz
+            memlat-*.tar.gz.sha256
+          body: See [CHANGELOG.md](CHANGELOG.md) for the changes in this release.

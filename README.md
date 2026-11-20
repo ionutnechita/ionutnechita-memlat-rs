@@ -62,6 +62,11 @@ are not reported.
     count;
   - root (or `CAP_SYS_NICE`) for `--fifo`.
 
+## Install
+
+Static binaries for x86_64 Linux are attached to each
+[release](https://github.com/ionutnechita/ionutnechita-memlat-rs/releases).
+
 ## Build
 
 ```sh

@@ -34,3 +34,13 @@ jobs:
       # core_probe_stable is #[ignore]d: it needs a quiet machine
       - run: cargo test --release --locked
       - run: cargo clippy --release --all-targets --locked
+
+  musl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked --target x86_64-unknown-linux-musl
