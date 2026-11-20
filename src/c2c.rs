@@ -185,6 +185,7 @@ pub fn to_json(cpus: &[usize], samples: usize, pairs: &[Pair], overhead_ns: f64)
     });
     obj([
         ("memlat", env!("CARGO_PKG_VERSION").into()),
+        ("schema", crate::report::JSON_SCHEMA.into()),
         ("mode", "c2c".into()),
         ("cpus", arr(cpus.iter().copied())),
         ("round_trips_per_pair", samples.into()),

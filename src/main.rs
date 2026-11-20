@@ -65,7 +65,7 @@ mod view;
 
 use cli::Config;
 use measure::{Mapping, Outlier, Pages, Params, RunResult, Sink, Stats};
-use report::{CpuRun, report};
+use report::{CpuRun, Mode, report};
 use std::io;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
@@ -403,7 +403,7 @@ fn benchmark(prog: &str, a: &[String]) {
         let _ = t.join();
     }
     finished(boost.as_mut());
-    report(&c, tpn, &runs, &window, boost.as_ref());
+    report(Mode::Benchmark, &c, tpn, &runs, &window, boost.as_ref());
 }
 
 fn top(prog: &str, a: &[String]) {
@@ -447,7 +447,7 @@ fn top(prog: &str, a: &[String]) {
     let numa = numa_note(cpu, map.as_ref());
     let run = CpuRun { cpu, lines, pages, numa, r, outs: got.outs, note, newest: true, tsc_read_ns };
     let window = report::Window { smi: got.smi, irq: (irq0, irq1) };
-    report(&c, tpn, &[run], &window, boost.as_ref());
+    report(Mode::Top, &c, tpn, &[run], &window, boost.as_ref());
 }
 
 fn c2c(prog: &str, a: &[String]) {

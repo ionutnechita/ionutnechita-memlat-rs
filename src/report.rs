@@ -15,6 +15,24 @@ const COINCIDENCE_NS: f64 = 10e3;
 const PRINT_COINCIDENCES: usize = 20;
 const PRINT_PHASES: usize = 8;
 const PRINT_IRQS: usize = 8;
+// version of the --json layout: bumped when a key changes meaning or goes
+// away (new keys may be added without a bump)
+pub const JSON_SCHEMA: u32 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Mode {
+    Benchmark,
+    Top,
+}
+
+impl Mode {
+    fn name(self) -> &'static str {
+        match self {
+            Mode::Benchmark => "benchmark",
+            Mode::Top => "top",
+        }
+    }
+}
 
 // one measured CPU, after the run
 pub struct CpuRun {
@@ -107,7 +125,14 @@ fn coincidences(tpn: f64, runs: &[CpuRun]) -> Coincidences {
     Coincidences { groups, chance, on_all }
 }
 
-pub fn report(c: &Config, tpn: f64, runs: &[CpuRun], w: &Window, boost: Option<&platform::Boost>) {
+pub fn report(
+    mode: Mode,
+    c: &Config,
+    tpn: f64,
+    runs: &[CpuRun],
+    w: &Window,
+    boost: Option<&platform::Boost>,
+) {
     // the raw data first, before any analysis
     let csv = c.log.as_ref().map(|path| (path, write_csv(path, tpn, runs)));
     let an: Vec<Analyzed> = runs.iter().map(|r| analyze(r, w)).collect();
@@ -119,7 +144,7 @@ pub fn report(c: &Config, tpn: f64, runs: &[CpuRun], w: &Window, boost: Option<&
         print_text(c, tpn, runs, &an, partner.as_ref(), coinc.as_ref(), w, boost);
     }
     if let Some(path) = &c.json {
-        let v = to_json(c, tpn, runs, &an, partner.as_ref(), coinc.as_ref(), w, boost);
+        let v = to_json(mode, c, tpn, runs, &an, partner.as_ref(), coinc.as_ref(), w, boost);
         match json::save(path, &v) {
             Ok(()) if text => println!("\nreport written to {path} as JSON"),
             Ok(()) => {}
@@ -445,6 +470,7 @@ fn run_json(c: &Config, tpn: f64, run: &CpuRun, a: &Analyzed) -> Value {
 
 #[allow(clippy::too_many_arguments)]
 fn to_json(
+    mode: Mode,
     c: &Config,
     tpn: f64,
     runs: &[CpuRun],
@@ -454,7 +480,6 @@ fn to_json(
     w: &Window,
     boost: Option<&platform::Boost>,
 ) -> Value {
-    let mode = if runs.first().is_some_and(|r| r.newest) { "top" } else { "benchmark" };
     let config = obj([
         ("cpus", arr(c.cpus.iter().copied())),
         ("size", if c.size == 0 { Value::Null } else { c.size.into() }),
@@ -499,7 +524,8 @@ fn to_json(
     });
     obj([
         ("memlat", env!("CARGO_PKG_VERSION").into()),
-        ("mode", mode.into()),
+        ("schema", JSON_SCHEMA.into()),
+        ("mode", mode.name().into()),
         ("config", config),
         ("tsc_ghz", tpn.into()),
         ("settle_s", (SETTLE_NS / 1e9).into()),
@@ -536,4 +562,90 @@ fn write_csv(path: &str, tpn: f64, runs: &[CpuRun]) -> io::Result<usize> {
     }
     w.flush()?;
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::measure::{NBUCKETS, Stats};
+
+    fn run(cpu: usize, outs: Vec<Outlier>) -> CpuRun {
+        let mut hist = [0u64; NBUCKETS];
+        hist[0] = 1000;
+        hist[NBUCKETS - 1] = outs.len() as u64;
+        let stats = Stats {
+            hist,
+            iters: 1000 + outs.len() as u64,
+            max_d: 30_000,
+            nout: outs.len() as u64,
+            ..Stats::default()
+        };
+        CpuRun {
+            cpu,
+            lines: 8192,
+            pages: "hugetlb 2M pages".into(),
+            numa: String::new(),
+            r: RunResult { stats, idx: 7, elapsed_tsc: 3_000_000_000 },
+            outs,
+            note: String::new(),
+            newest: false,
+            tsc_read_ns: 20.0,
+        }
+    }
+
+    // the --json layout scripts rely on: keys, nesting and units
+    #[test]
+    fn json_layout() {
+        let args: Vec<String> = "2,3 512K 1 --json -".split(' ').map(String::from).collect();
+        let (c, _) = crate::cli::benchmark(&args).unwrap();
+        let o =
+            |ms: u64| Outlier { tsc: ms * 3_000_000, ns: 25_000, sec: 100, nsec: (ms * 1_000_000) as i64 };
+        let runs = [run(2, vec![o(1), o(2)]), run(3, vec![o(2)])];
+        let w = Window { smi: (Some(5), Some(7)), irq: (irq::Snapshot::default(), irq::Snapshot::default()) };
+        let an: Vec<Analyzed> = runs.iter().map(|r| analyze(r, &w)).collect();
+        let co = coincidences(3.0, &runs);
+        let v = to_json(Mode::Benchmark, &c, 3.0, &runs, &an, None, Some(&co), &w, None);
+        let s = v.to_json();
+        for key in [
+            "\"schema\": 1,",
+            "\"mode\": \"benchmark\"",
+            "\"cpus\": [2, 3]",
+            "\"size\": 524288",
+            "\"huge\": \"auto\"",
+            "\"smis\": 2",
+            "\"iterations\": 1002",
+            "\"max_us\": 10.0",
+            "\"duration_s\": 1.0",
+            "\"outliers_kept\": 2",
+            "\"dur_us\": 25.0",
+            "\"mono_sec\": 100",
+            "\"lo_ns\": 20000",
+            "\"hi_ns\": null",
+            "\"on_all_cpus\": 1",
+            "\"breaktrace\": null",
+            "\"interrupts\": {",
+        ] {
+            assert!(s.contains(key), "{key} missing in\n{s}");
+        }
+        let Value::Obj(top) = &v else { panic!() };
+        let keys: Vec<&str> = top.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "memlat",
+                "schema",
+                "mode",
+                "config",
+                "tsc_ghz",
+                "settle_s",
+                "stopped",
+                "runs",
+                "partner_interrupts",
+                "smis",
+                "coincidences",
+                "breaktrace",
+                "fifo_notes"
+            ]
+        );
+    }
 }

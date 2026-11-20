@@ -99,3 +99,28 @@ fn json_on_stdout() {
     assert!(out.contains("\"median_ns\": "), "{out}");
     assert!(!out.contains("closest  pair"), "text report mixed in: {out}");
 }
+
+// the number after `"key": ` in a JSON text
+fn json_num(s: &str, key: &str) -> f64 {
+    let pat = format!("\"{key}\": ");
+    let i = s.find(&pat).unwrap_or_else(|| panic!("{key} missing")) + pat.len();
+    let end = s[i..].find([',', '\n']).map_or(s.len(), |e| i + e);
+    s[i..end].parse().unwrap_or_else(|_| panic!("{key}: {}", &s[i..end]))
+}
+
+// a real (short) measurement from start to report: 2 s settle + 1 s
+#[test]
+fn benchmark_end_to_end() {
+    let o = memlat("benchmark 0 1M 1 --huge none --json -");
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let out = stdout(&o);
+    assert!(out.contains("\"mode\": \"benchmark\""), "{out}");
+    assert!(out.contains("\"pages\": \"4K pages, THP off\""), "{out}");
+    assert!(json_num(&out, "iterations") > 1e5, "{out}");
+    let d = json_num(&out, "duration_s");
+    assert!((0.9..2.0).contains(&d), "duration {d}");
+    assert!(json_num(&out, "lines") == (1 << 20) as f64 / 64.0);
+    assert!(json_num(&out, "max_us") > 0.0);
+    // the text report stays off stdout
+    assert!(!out.contains("time per iteration histogram"), "{out}");
+}
