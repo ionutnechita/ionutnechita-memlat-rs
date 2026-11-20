@@ -274,6 +274,34 @@ pub fn memory_shortfall(size: u64, count: u64, m: &MemInfo) -> Option<String> {
     ))
 }
 
+// free hugetlb pages of `page` bytes, from sysfs; None if the kernel or the
+// CPU has no such page size
+pub fn free_hugetlb(page: u64) -> Option<u64> {
+    let path = format!("/sys/kernel/mm/hugepages/hugepages-{}kB/free_hugepages", page >> 10);
+    fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+// Why `count` buffers of `size` bytes do not fit in the free hugetlb pages
+// of `page` bytes, if they do not; each buffer takes whole pages.
+pub fn hugetlb_shortfall_in(size: u64, count: u64, page: u64, free: Option<u64>) -> Option<String> {
+    let name = crate::measure::page_name(page as usize);
+    let Some(free) = free else {
+        return Some(format!("hugetlb {name} pages are not supported here (no hugepages-{}kB)", page >> 10));
+    };
+    let need = size.div_ceil(page).saturating_mul(count);
+    (need > free).then(|| {
+        format!(
+            "--huge {name}: {need} free hugetlb {name} pages needed, {free} free; reserve them with \
+             echo {need} > /sys/kernel/mm/hugepages/hugepages-{}kB/nr_hugepages (as root)",
+            page >> 10
+        )
+    })
+}
+
+pub fn hugetlb_shortfall(size: u64, count: u64, page: u64) -> Option<String> {
+    hugetlb_shortfall_in(size, count, page, free_hugetlb(page))
+}
+
 const MSR_SMI_COUNT: u64 = 0x34;
 
 fn is_intel() -> bool {
@@ -304,7 +332,7 @@ pub fn smi_count() -> Option<u32> {
 mod tests {
     use super::missing_tsc_flags;
 
-    use super::{MemInfo, memory_shortfall, parse_meminfo};
+    use super::{MemInfo, hugetlb_shortfall_in, memory_shortfall, parse_meminfo};
 
     const MEMINFO: &str = "MemTotal:       32000000 kB\nMemFree:         1000000 kB\n\
         MemAvailable:   16000000 kB\nHugePages_Total:     512\nHugePages_Free:      256\n\
@@ -317,6 +345,19 @@ mod tests {
         let no_huge = parse_meminfo("MemAvailable:   1000 kB\n").unwrap();
         assert_eq!(no_huge, MemInfo { available: 1_024_000, huge_free: 0 });
         assert_eq!(parse_meminfo("MemTotal: 1000 kB\n"), None);
+    }
+
+    #[test]
+    fn hugetlb_pages() {
+        let g = 1u64 << 30;
+        assert_eq!(hugetlb_shortfall_in(16 * g, 2, g, Some(32)), None);
+        // 1.5G takes two 1G pages
+        assert_eq!(hugetlb_shortfall_in(3 * g / 2, 1, g, Some(2)), None);
+        let m = hugetlb_shortfall_in(3 * g / 2, 2, g, Some(3)).unwrap();
+        assert!(m.starts_with("--huge 1G: 4 free hugetlb 1G pages needed, 3 free"), "{m}");
+        assert!(m.contains("hugepages-1048576kB"), "{m}");
+        let m = hugetlb_shortfall_in(g, 1, g, None).unwrap();
+        assert!(m.contains("not supported"), "{m}");
     }
 
     #[test]

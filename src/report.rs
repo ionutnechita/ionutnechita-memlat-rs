@@ -16,7 +16,7 @@ const PRINT_PHASES: usize = 8;
 pub struct CpuRun {
     pub cpu: usize,
     pub lines: usize,
-    pub huge: bool,
+    pub pages: String, // what the buffer is on; empty for ping-pong
     pub r: RunResult,
     pub outs: Vec<Outlier>, // oldest first
     pub note: String,
@@ -132,12 +132,7 @@ fn print_run(c: &Config, tpn: f64, run: &CpuRun) {
     let what = if run.lines == 0 {
         format!("{} (each iteration is one cache-line round trip)", c.size_str)
     } else {
-        format!(
-            "size={} ({} lines, {})",
-            c.size_str,
-            run.lines,
-            if run.huge { "hugetlb" } else { "normal pages" }
-        )
+        format!("size={} ({} lines, {})", c.size_str, run.lines, run.pages)
     };
     println!(
         "cpu={} {} duration={:.1}s{} iterations={} tsc={:.3} GHz",

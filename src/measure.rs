@@ -131,33 +131,176 @@ impl Rng {
     }
 }
 
+// Page size for the buffer (--huge):
+//   Auto    hugetlb pages of the default size if reserved, else normal pages
+//           with transparent huge pages advised
+//   Huge2M  hugetlb 2M pages, or an error
+//   Huge1G  hugetlb 1G pages, or an error: a 16G buffer then needs only 16
+//           TLB entries, so the TLB is out of the picture even for DRAM
+//   Small   4K pages with THP off, to see what the TLB adds
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Pages {
+    #[default]
+    Auto,
+    Huge2M,
+    Huge1G,
+    Small,
+}
+
+impl Pages {
+    pub fn parse(s: &str) -> Option<Pages> {
+        match s {
+            "auto" => Some(Pages::Auto),
+            "2M" | "2m" => Some(Pages::Huge2M),
+            "1G" | "1g" => Some(Pages::Huge1G),
+            "none" => Some(Pages::Small),
+            _ => None,
+        }
+    }
+
+    // explicit hugetlb page size, in bytes
+    pub fn hugetlb(self) -> Option<usize> {
+        match self {
+            Pages::Huge2M => Some(2 << 20),
+            Pages::Huge1G => Some(1 << 30),
+            _ => None,
+        }
+    }
+}
+
+// what a buffer ended up on
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Backing {
+    Hugetlb(usize), // page size in bytes
+    Thp,
+    Small,
+}
+
+pub fn page_name(bytes: usize) -> String {
+    match bytes {
+        b if b >= 1 << 30 && b % (1 << 30) == 0 => format!("{}G", b >> 30),
+        b if b >= 1 << 20 && b % (1 << 20) == 0 => format!("{}M", b >> 20),
+        b => format!("{}K", b >> 10),
+    }
+}
+
+impl Backing {
+    pub fn label(self) -> String {
+        match self {
+            Backing::Hugetlb(p) => format!("hugetlb {} pages", page_name(p)),
+            Backing::Thp => "normal pages, THP advised".to_string(),
+            Backing::Small => "4K pages, THP off".to_string(),
+        }
+    }
+}
+
+// default hugetlb page size (Hugepagesize in /proc/meminfo), 2M if unknown
+pub fn default_hugepage() -> usize {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|s| {
+            let l = s.lines().find(|l| l.starts_with("Hugepagesize:"))?;
+            l.split_whitespace().nth(1)?.parse::<usize>().ok()
+        })
+        .map_or(2 << 20, |kb| kb << 10)
+}
+
+// mmap flags selecting the hugetlb page size: log2 of it, shifted
+const MAP_HUGE_SHIFT: libc::c_int = 26;
+// faults every page in now and reports a failure instead of a later SIGBUS
+// (Linux 5.14); older kernels say EINVAL
+const MADV_POPULATE_WRITE: libc::c_int = 23;
+
 // mmap'ed buffer of `lines` cache lines; unmapped on drop
 pub struct Mapping {
     ptr: *mut Node,
-    size: usize,
+    len: usize, // mapped length: the size rounded up to whole pages
     pub lines: usize,
-    pub huge: bool,
+    pub backing: Backing,
+}
+
+fn anon_map(len: usize, flags: libc::c_int) -> io::Result<*mut Node> {
+    let prot = libc::PROT_READ | libc::PROT_WRITE;
+    let flags = flags | libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
+    // SAFETY: a new anonymous mapping, it aliases nothing; MAP_FAILED is checked
+    let p = unsafe { libc::mmap(ptr::null_mut(), len, prot, flags, -1, 0) };
+    if p == libc::MAP_FAILED { Err(io::Error::last_os_error()) } else { Ok(p.cast()) }
 }
 
 impl Mapping {
-    pub fn new(size: usize) -> io::Result<Mapping> {
+    // Maps the buffer and backs every page of it before returning. Nothing is
+    // populated by mmap itself (no MAP_POPULATE): the page size advice, and
+    // the NUMA placement, must come first to apply to the pages.
+    pub fn new(
+        size: usize,
+        pages: Pages,
+        before_populate: impl Fn(&Mapping) -> io::Result<()>,
+    ) -> io::Result<Mapping> {
         let lines = size / LINE;
-        let prot = libc::PROT_READ | libc::PROT_WRITE;
-        let flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_POPULATE;
-        // try hugetlb pages first to take the TLB out of the picture
-        // SAFETY: a new anonymous mapping, it aliases nothing; MAP_FAILED is checked
-        let p = unsafe { libc::mmap(ptr::null_mut(), size, prot, flags | libc::MAP_HUGETLB, -1, 0) };
-        if p != libc::MAP_FAILED {
-            return Ok(Mapping { ptr: p.cast(), size, lines, huge: true });
+        let m = match pages {
+            Pages::Huge2M | Pages::Huge1G => {
+                let page = pages.hugetlb().unwrap_or(2 << 20);
+                Mapping::hugetlb(size, lines, page, true)?
+            }
+            // hugetlb pages of the default size if any are reserved
+            Pages::Auto => match Mapping::hugetlb(size, lines, default_hugepage(), false) {
+                Ok(m) => m,
+                Err(_) => Mapping::normal(size, lines, true)?,
+            },
+            Pages::Small => Mapping::normal(size, lines, false)?,
+        };
+        before_populate(&m)?;
+        m.populate()?;
+        Ok(m)
+    }
+
+    fn hugetlb(size: usize, lines: usize, page: usize, explicit: bool) -> io::Result<Mapping> {
+        let len = size.div_ceil(page) * page;
+        let mut flags = libc::MAP_HUGETLB;
+        if explicit {
+            flags |= (page.trailing_zeros() as libc::c_int) << MAP_HUGE_SHIFT;
         }
-        // SAFETY: as above
-        let p = unsafe { libc::mmap(ptr::null_mut(), size, prot, flags, -1, 0) };
-        if p == libc::MAP_FAILED {
-            return Err(io::Error::last_os_error());
+        let ptr = anon_map(len, flags).map_err(|e| {
+            let kb = page >> 10;
+            io::Error::new(
+                e.kind(),
+                format!(
+                    "no free hugetlb {} pages for {} bytes ({e}); reserve them in \
+                     /sys/kernel/mm/hugepages/hugepages-{kb}kB/nr_hugepages",
+                    page_name(page),
+                    len
+                ),
+            )
+        })?;
+        Ok(Mapping { ptr, len, lines, backing: Backing::Hugetlb(page) })
+    }
+
+    fn normal(size: usize, lines: usize, thp: bool) -> io::Result<Mapping> {
+        let ptr = anon_map(size, 0)?;
+        let m = Mapping { ptr, len: size, lines, backing: if thp { Backing::Thp } else { Backing::Small } };
+        let advice = if thp { libc::MADV_HUGEPAGE } else { libc::MADV_NOHUGEPAGE };
+        // SAFETY: ptr..ptr+size is the mapping just made; madvise is only a hint
+        unsafe { libc::madvise(ptr.cast(), size, advice) };
+        Ok(m)
+    }
+
+    fn populate(&self) -> io::Result<()> {
+        // SAFETY: the whole mapping made in new()
+        if unsafe { libc::madvise(self.ptr.cast(), self.len, MADV_POPULATE_WRITE) } == 0 {
+            return Ok(());
         }
-        // SAFETY: p..p+size is the mapping just made; madvise is only a hint
-        unsafe { libc::madvise(p, size, libc::MADV_HUGEPAGE) };
-        Ok(Mapping { ptr: p.cast(), size, lines, huge: false })
+        let e = io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::EINVAL) {
+            return Err(e);
+        }
+        // before Linux 5.14: write to every 4K page (hugetlb pages were
+        // reserved by mmap, so these faults cannot fail for want of them)
+        let base: *mut u8 = self.ptr.cast();
+        for off in (0..self.len).step_by(4096) {
+            // SAFETY: off < len, inside the writable mapping
+            unsafe { ptr::write_volatile(base.add(off), 0) };
+        }
+        Ok(())
     }
 
     // single random cycle over all cache lines (Sattolo's algorithm)
@@ -216,8 +359,9 @@ impl Work for Chase<'_> {
 
 impl Drop for Mapping {
     fn drop(&mut self) {
-        // SAFETY: the mapping made in new(); no Chase outlives it (they borrow it)
-        unsafe { libc::munmap(self.ptr.cast(), self.size) };
+        // SAFETY: the mapping made in new(), whole pages; no Chase outlives it
+        // (they borrow it)
+        unsafe { libc::munmap(self.ptr.cast(), self.len) };
     }
 }
 
@@ -455,6 +599,39 @@ mod tests {
         assert!(sink.outs.is_empty());
         assert!(r.elapsed_tsc >= 3 * p.publish_tsc);
         assert!(r.stats.core_mhz > 0 || r.stats.core_min == 0);
+    }
+
+    #[test]
+    fn page_sizes() {
+        assert_eq!(Pages::parse("1G"), Some(Pages::Huge1G));
+        assert_eq!(Pages::parse("2m"), Some(Pages::Huge2M));
+        assert_eq!(Pages::parse("none"), Some(Pages::Small));
+        assert_eq!(Pages::parse("auto"), Some(Pages::Auto));
+        assert_eq!(Pages::parse("4K"), None);
+        assert_eq!(
+            (page_name(1 << 30), page_name(2 << 20), page_name(4096)),
+            ("1G".into(), "2M".into(), "4K".into())
+        );
+        assert_eq!(Backing::Hugetlb(1 << 30).label(), "hugetlb 1G pages");
+    }
+
+    // every mode that needs no reserved pages maps, populates and walks
+    #[test]
+    fn mappings() {
+        for (pages, want) in [(Pages::Small, Backing::Small), (Pages::Auto, Backing::Thp)] {
+            let mut m = Mapping::new(3 << 20, pages, |_| Ok(())).unwrap();
+            if pages == Pages::Auto && matches!(m.backing, Backing::Hugetlb(_)) {
+                continue; // this machine has hugetlb pages reserved
+            }
+            assert_eq!(m.backing, want);
+            assert_eq!(m.lines, (3 << 20) / LINE);
+            m.build_cycle();
+            let mut c = m.chase();
+            // a single cycle: back at the start after exactly `lines` steps
+            let first = c.step();
+            let n = (1..=m.lines).find(|_| c.step() == first).unwrap();
+            assert_eq!(n, m.lines);
+        }
     }
 
     // Repeated probes agree within a few percent (most of them). Pinned, so the

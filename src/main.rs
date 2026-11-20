@@ -62,7 +62,7 @@ mod trace;
 mod view;
 
 use cli::Config;
-use measure::{Mapping, Outlier, Params, RunResult, Sink, Stats};
+use measure::{Mapping, Outlier, Pages, Params, RunResult, Sink, Stats};
 use report::{CpuRun, report};
 use std::io;
 use std::sync::{Arc, Barrier};
@@ -96,14 +96,24 @@ fn or_exit<T>(prog: &str, r: cli::Result<T>) -> T {
 }
 
 // buffers that do not fit in memory would be OOM-killed while populated
-fn check_memory(size: usize, count: usize) {
+fn check_memory(size: usize, count: usize, pages: Pages) {
     if size == 0 {
+        return;
+    }
+    // explicit hugetlb pages: they must be reserved, MemAvailable is no help
+    if let Some(page) = pages.hugetlb() {
+        if let Some(msg) = platform::hugetlb_shortfall(size as u64, count as u64, page as u64) {
+            eprintln!("{msg}");
+            process::exit(1);
+        }
         return;
     }
     let Some(m) = std::fs::read_to_string("/proc/meminfo").ok().and_then(|s| platform::parse_meminfo(&s))
     else {
         return;
     };
+    // 4K pages: the free hugetlb pages are no use
+    let m = if pages == Pages::Small { platform::MemInfo { huge_free: 0, ..m } } else { m };
     if let Some(msg) = platform::memory_shortfall(size as u64, count as u64, &m) {
         eprintln!("{msg}");
         process::exit(1);
@@ -139,13 +149,13 @@ fn lock() {
 
 // pin, allocate, lock and build the chase cycle on the measured CPU, so the
 // buffer is first-touched on its NUMA node; nothing to allocate for ping-pong
-fn setup(cpu: usize, size: usize) -> Option<Mapping> {
+fn setup(cpu: usize, size: usize, pages: Pages) -> Option<Mapping> {
     pin(cpu);
     if size == 0 {
         lock();
         return None;
     }
-    let mut map = Mapping::new(size).unwrap_or_else(|e| die("mmap", e));
+    let mut map = Mapping::new(size, pages, |_| Ok(())).unwrap_or_else(|e| die("mmap", e));
     lock();
     map.build_cycle();
     Some(map)
@@ -281,7 +291,7 @@ fn check_trace(c: &Config) {
 fn benchmark(prog: &str, a: &[String]) {
     let (c, secs) = or_exit(prog, cli::benchmark(a));
     check_cpus(prog, &c.all_cpus());
-    check_memory(c.size, c.cpus.len());
+    check_memory(c.size, c.cpus.len(), c.pages);
     check_trace(&c);
     platform::warn_tsc();
     platform::install_signal_handlers();
@@ -302,6 +312,7 @@ fn benchmark(prog: &str, a: &[String]) {
         .iter()
         .map(|&cpu| {
             let (ready, size, keep, prio, pp) = (Arc::clone(&ready), c.size, c.keep, c.fifo, pp.clone());
+            let pages = c.pages;
             let tracer = tracer(cpu, &c);
             thread::Builder::new()
                 .name(format!("memlat-{cpu}"))
@@ -310,7 +321,7 @@ fn benchmark(prog: &str, a: &[String]) {
                     // allocated before setup() so mlockall covers it
                     let inner = Collect { buf: vec![Outlier::default(); keep], len: 0 };
                     let mut sink = Traced { inner, tracer };
-                    let map = setup(cpu, size);
+                    let map = setup(cpu, size, pages);
                     fifo(prio);
                     let tsc_read_ns = measure::tsc_overhead() as f64 / tpn;
                     ready.wait();
@@ -322,8 +333,9 @@ fn benchmark(prog: &str, a: &[String]) {
                     } else {
                         String::new()
                     };
-                    let (lines, huge) = map.as_ref().map_or((0, false), |m| (m.lines, m.huge));
-                    CpuRun { cpu, lines, huge, r, outs: sink.buf, note, newest: false, tsc_read_ns }
+                    let (lines, pages) =
+                        map.as_ref().map_or((0, String::new()), |m| (m.lines, m.backing.label()));
+                    CpuRun { cpu, lines, pages, r, outs: sink.buf, note, newest: false, tsc_read_ns }
                 })
                 .expect("spawn measurement thread")
         })
@@ -351,7 +363,7 @@ fn benchmark(prog: &str, a: &[String]) {
 fn top(prog: &str, a: &[String]) {
     let c = or_exit(prog, cli::top(a));
     check_cpus(prog, &c.all_cpus());
-    check_memory(c.size, 1);
+    check_memory(c.size, 1, c.pages);
     check_trace(&c);
     platform::warn_tsc();
     let cpu = c.cpus[0];
@@ -360,13 +372,13 @@ fn top(prog: &str, a: &[String]) {
     platform::block_signals();
     let pp = c.partner.map(|_| Arc::new(pingpong::Shared::new()));
     let partner = c.partner.zip(pp.clone()).map(|(cpu, s)| spawn_partner(cpu, c.fifo, s, None));
-    let map = setup(cpu, c.size);
+    let map = setup(cpu, c.size, c.pages);
     let tpn = measure::tsc_per_ns();
     fifo(c.fifo);
     let mut boost = c.fifo.map(|prio| platform::Boost::apply(&c.all_cpus(), prio));
-    let (lines, huge) = map.as_ref().map_or((0, false), |m| (m.lines, m.huge));
+    let (lines, pages) = map.as_ref().map_or((0, String::new()), |m| (m.lines, m.backing.label()));
     let tsc_read_ns = measure::tsc_overhead() as f64 / tpn;
-    top::publish_info(lines, huge, tpn, tsc_read_ns);
+    top::publish_info(lines, &pages, tpn, tsc_read_ns);
     let p = Params {
         tpn,
         thresh_ns: c.thresh_ns,
@@ -385,7 +397,7 @@ fn top(prog: &str, a: &[String]) {
     finished(boost.as_mut());
     let got = top::finish(display);
     let note = if got.missed > 0 { format!(" ({} not kept)", got.missed) } else { String::new() };
-    let run = CpuRun { cpu, lines, huge, r, outs: got.outs, note, newest: true, tsc_read_ns };
+    let run = CpuRun { cpu, lines, pages, r, outs: got.outs, note, newest: true, tsc_read_ns };
     let window = report::Window { smi: got.smi, irq: (irq0, irq1) };
     report(&c, tpn, &[run], &window, boost.as_ref());
 }

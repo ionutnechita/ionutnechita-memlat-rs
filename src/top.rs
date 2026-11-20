@@ -13,6 +13,7 @@ use crate::platform;
 use crate::view::{Header, Sample, Totals, View};
 use std::collections::VecDeque;
 use std::io::{self, Write as _};
+use std::sync::OnceLock;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, fence};
 use std::thread::{self, JoinHandle};
@@ -54,7 +55,6 @@ struct Shared {
     tpn_bits: AtomicU64,
     tsc_read_bits: AtomicU64,
     lines: AtomicU64,
-    huge: AtomicBool,
     // counters, under the seqlock
     seq: AtomicU64,
     iters: AtomicU64,
@@ -73,7 +73,6 @@ static SHARED: Shared = Shared {
     tpn_bits: AtomicU64::new(0),
     tsc_read_bits: AtomicU64::new(0),
     lines: AtomicU64::new(0),
-    huge: AtomicBool::new(false),
     seq: AtomicU64::new(0),
     iters: AtomicU64::new(0),
     max_d: AtomicU64::new(0),
@@ -142,10 +141,13 @@ fn recent(max: usize) -> Vec<Outlier> {
     (first..head).rev().filter_map(read_slot).collect()
 }
 
-pub fn publish_info(lines: usize, huge: bool, tpn: f64, tsc_read_ns: f64) {
+// what the buffer is on, set once before tpn_bits
+static PAGES: OnceLock<String> = OnceLock::new();
+
+pub fn publish_info(lines: usize, pages: &str, tpn: f64, tsc_read_ns: f64) {
+    let _ = PAGES.set(pages.to_string());
     SHARED.tsc_read_bits.store(tsc_read_ns.to_bits(), Relaxed);
     SHARED.lines.store(lines as u64, Relaxed);
-    SHARED.huge.store(huge, Relaxed);
     SHARED.tpn_bits.store(tpn.to_bits(), Release);
 }
 
@@ -279,7 +281,7 @@ fn display(avoid: &[usize], cpu: usize, size: &str, thresh_ns: u64, keep: usize)
         cpu,
         size,
         lines: SHARED.lines.load(Relaxed),
-        huge: SHARED.huge.load(Relaxed),
+        pages: PAGES.get().map_or("", String::as_str),
         tpn,
         tsc_read_ns: f64::from_bits(SHARED.tsc_read_bits.load(Relaxed)),
         thresh_ns,

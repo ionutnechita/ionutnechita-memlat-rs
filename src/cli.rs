@@ -2,7 +2,7 @@
 // function returns a Result, and main() turns an Error into help text or a
 // message and the exit code, so the parsing can be unit tested.
 
-use crate::measure::LINE;
+use crate::measure::{LINE, Pages};
 
 pub const DEFAULT_KEEP: usize = 1 << 16;
 pub const DEFAULT_THRESH_NS: u64 = 3000;
@@ -47,6 +47,8 @@ options:
                    and rcuc/N of the measured cpus are lifted above it for the run
   --keep N         outliers kept per cpu (default {DEFAULT_KEEP})
   --pingpong CPU   partner cpu for the round-trip mode
+  --huge PAGES     buffer pages: auto (hugetlb if reserved, else THP; default),
+                   2M or 1G (reserved hugetlb pages, or an error), none (4K)
   --tracemark      write every outlier to the ftrace buffer (trace_marker)
   --breaktrace US  stop ftrace (tracing_on = 0) and the run at the first
                    outlier of at least US microseconds
@@ -129,6 +131,7 @@ pub struct Opts {
     pub partner: Option<usize>,
     pub tracemark: bool,
     pub breaktrace_us: Option<u64>,
+    pub pages: Pages,
 }
 
 impl Default for Opts {
@@ -140,13 +143,14 @@ impl Default for Opts {
             partner: None,
             tracemark: false,
             breaktrace_us: None,
+            pages: Pages::Auto,
         }
     }
 }
 
 // options without a value
 const FLAGS: [&str; 1] = ["tracemark"];
-const VALUED: [&str; 5] = ["log", "fifo", "keep", "pingpong", "breaktrace"];
+const VALUED: [&str; 6] = ["log", "fifo", "keep", "pingpong", "breaktrace", "huge"];
 
 // options may come anywhere; returns them and the positional arguments
 pub fn options(args: &[String]) -> Result<(Opts, Vec<String>)> {
@@ -190,6 +194,12 @@ pub fn options(args: &[String]) -> Result<(Opts, Vec<String>)> {
                 o.fifo = Some(p);
             }
             "keep" => o.keep = num(&value, "keep")?,
+            "huge" => {
+                let Some(p) = Pages::parse(&value) else {
+                    return invalid(format!("invalid --huge: {value} (auto, 2M, 1G or none)"));
+                };
+                o.pages = p;
+            }
             "breaktrace" => {
                 let us: u64 = num(&value, "breaktrace threshold (us)")?;
                 if us == 0 {
@@ -215,6 +225,7 @@ pub struct Config {
     pub partner: Option<usize>, // --pingpong: no size argument then
     pub tracemark: bool,
     pub breaktrace_us: Option<u64>,
+    pub pages: Pages,
 }
 
 impl Config {
@@ -227,7 +238,7 @@ impl Config {
 // cpus, size (unless --pingpong), then the positional arguments that follow,
 // with the threshold at `thresh_pos` (counting the size slot either way)
 fn parse(args: &[String], thresh_pos: usize) -> Result<(Config, Vec<String>)> {
-    let (Opts { log, fifo, keep, partner, tracemark, breaktrace_us }, mut pos) = options(args)?;
+    let (Opts { log, fifo, keep, partner, tracemark, breaktrace_us, pages }, mut pos) = options(args)?;
     let cpus = parse_cpus(pos.first().ok_or(Error::Usage)?)?;
     let (size_str, size) = match partner {
         Some(p) => {
@@ -262,7 +273,10 @@ fn parse(args: &[String], thresh_pos: usize) -> Result<(Config, Vec<String>)> {
             return invalid(format!("--breaktrace {us} us is below the outlier threshold of {thresh_ns} ns"));
         }
     }
-    Ok((Config { cpus, size_str, size, thresh_ns, log, fifo, keep, partner, tracemark, breaktrace_us }, pos))
+    Ok((
+        Config { cpus, size_str, size, thresh_ns, log, fifo, keep, partner, tracemark, breaktrace_us, pages },
+        pos,
+    ))
 }
 
 // memlat benchmark ...: the config and the run time in seconds
@@ -379,6 +393,8 @@ mod tests {
         assert_eq!(pos, ["2", "512K"]);
         assert!(o.tracemark);
         assert_eq!(o.breaktrace_us, Some(50));
+        assert_eq!(options(&args("--huge 1G")).unwrap().0.pages, Pages::Huge1G);
+        assert_eq!(options(&args("--huge=none")).unwrap().0.pages, Pages::Small);
         assert_eq!(options(&args("2 -h")), Err(Error::Help));
         assert_eq!(options(&args("--help")), Err(Error::Help));
         assert_eq!(options(&args("2 --version")), Err(Error::Version));
@@ -393,6 +409,8 @@ mod tests {
             "--pingpong x",
             "--tracemark=1",
             "--breaktrace 0",
+            "--huge 4K",
+            "--huge",
             "--breaktrace x",
         ] {
             assert!(matches!(options(&args(bad)), Err(Error::Invalid(_))), "{bad}");

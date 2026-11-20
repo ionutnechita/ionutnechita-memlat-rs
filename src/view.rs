@@ -24,7 +24,7 @@ pub struct Header<'a> {
     pub cpu: usize,
     pub size: &'a str,
     pub lines: u64,
-    pub huge: bool,
+    pub pages: &'a str,
     pub tpn: f64,
     pub tsc_read_ns: f64,
     pub thresh_ns: u64,
@@ -290,11 +290,7 @@ impl View {
     ) {
         let pen = self.pen;
         let e = up.as_secs();
-        let what = if h.lines == 0 {
-            h.size.to_string()
-        } else {
-            format!("{} {}", h.size, if h.huge { "hugetlb" } else { "normal pages" })
-        };
+        let what = if h.lines == 0 { h.size.to_string() } else { format!("{} {}", h.size, h.pages) };
         let lines = if h.lines == 0 { String::new() } else { format!("{} lines, ", h.lines) };
         let title = format!(
             " memlat top{} │ cpu {} │ {} │ threshold {} │ up {:02}:{:02}:{:02} │ \
