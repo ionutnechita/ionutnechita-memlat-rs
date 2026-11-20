@@ -23,20 +23,21 @@
 // partner CPU instead of a DRAM/cache access (see pingpong.rs): it shows
 // stalls of the coherence fabric and of either CPU.
 //
-// The report adds the SMI count of the run (MSR 0x34), periodic patterns
-// found in the outlier times and, with several CPUs, the stalls that hit them
-// at the same instant.
+// The report adds the SMI count of the run (MSR 0x34), the interrupts on the
+// measured CPUs, periodic patterns found in the outlier times and, with
+// several CPUs, the stalls that hit them at the same instant.
 //
 // Build: cargo build --release
 // Usage: memlat benchmark <cpu[,cpu...]> <size[K|M|G]> <seconds> [thresh_ns] [options]
 //        memlat top <cpu> <size[K|M|G]> [thresh_ns] [options]
 //        memlat benchmark <cpu> <seconds> [thresh_ns] --pingpong <cpu> [options]
 //        memlat top <cpu> [thresh_ns] --pingpong <cpu> [options]
-//        memlat c2c <cpus> [round trips per pair] [--fifo PRIO] [--log FILE]
+//        memlat c2c <cpus> [round trips per pair] [--fifo PRIO] [--log FILE] [--json FILE]
 //          core-to-core latency matrix (median and p99), see c2c.rs
-//   options: --log FILE (CSV of all kept outliers), --fifo PRIO (SCHED_FIFO
-//            loop, per-CPU kthreads lifted above it), --keep N (outliers kept),
-//            -V / --version
+//   options: --log FILE (CSV of all kept outliers), --json FILE (the report
+//            as JSON), --fifo PRIO (SCHED_FIFO loop, per-CPU kthreads lifted
+//            above it), --keep N (outliers kept), --huge PAGES, --mem-node N,
+//            --tracemark, --breaktrace US, -V / --version (see memlat --help)
 //   e.g. memlat benchmark 61 512K 60 ; memlat benchmark 2,40 16G 60 --fifo 1
 //        memlat top 61 16M --log out.csv
 

@@ -39,9 +39,18 @@ The report includes:
   in advance (e.g. "every 125.30 ms, 4 phases");
 - with several CPUs, **stalls that hit them at the same instant**, against
   the number expected by chance;
+- the **interrupts and softirqs** that ran on each measured CPU during the
+  measurement (local timer, IPIs, TLB shootdowns, device IRQs), the usual
+  cause of a stall on an isolated CPU;
 - the number of **SMIs** during the run (`MSR_SMI_COUNT`, Intel only);
+- the page size and the **NUMA node** the buffer ended up on, and whether
+  that node is the measured CPU's own;
 - the core clock seen during the run, measured without reading MSRs on the
   measured CPU.
+
+Everything in the report can also be written as JSON (`--json FILE`), and
+outliers can be marked in, or stop, an ftrace recording (`--tracemark`,
+`--breaktrace`).
 
 The measurement loop does no allocations, no syscalls, no I/O and cannot
 panic: all buffers are allocated, populated and locked before it starts, and
@@ -55,12 +64,14 @@ are not reported.
 - Rust 1.85 or newer (edition 2024).
 - Optional, for better results:
   - isolated CPUs (`isolcpus=`, `nohz_full=`, `rcu_nocbs=`) to measure on;
-  - hugetlb pages (`vm.nr_hugepages`), so that the TLB is out of the picture.
-    Without them `memlat` falls back to normal pages with `MADV_HUGEPAGE`;
+  - hugetlb pages (`vm.nr_hugepages`, or 1G pages for large buffers), so that
+    the TLB is out of the picture. Without them `memlat` falls back to normal
+    pages with transparent huge pages advised;
   - root (or `CAP_IPC_LOCK`) for `mlockall`;
   - root, the `msr` module (`modprobe msr`) and an Intel CPU for the SMI
     count;
-  - root (or `CAP_SYS_NICE`) for `--fifo`.
+  - root (or `CAP_SYS_NICE`) for `--fifo`;
+  - root and tracefs for `--tracemark` / `--breaktrace`.
 
 ## Install
 
@@ -81,7 +92,7 @@ memlat benchmark <cpu[,cpu...]> <size[K|M|G]> <seconds> [thresh_ns] [options]
 memlat top <cpu> <size[K|M|G]> [thresh_ns] [options]
 memlat benchmark <cpu> <seconds> [thresh_ns] --pingpong <partner> [options]
 memlat top <cpu> [thresh_ns] --pingpong <partner> [options]
-memlat c2c <cpus> [round trips per pair] [--fifo PRIO] [--log FILE]
+memlat c2c <cpus> [round trips per pair] [--fifo PRIO] [--log FILE] [--json FILE]
 ```
 
 CPU lists take commas and ranges (`2,40` or `2-5,8`). The outlier threshold
@@ -93,11 +104,17 @@ defaults to 3000 ns.
 | `--fifo PRIO` | run the loop as `SCHED_FIFO` PRIO (1-98); `ktimers/N`, `irq_work/N` and `rcuc/N` of the measured CPUs are lifted above it for the run and restored afterwards |
 | `--keep N` | outliers kept per CPU (default 65536) |
 | `--pingpong CPU` | partner CPU for the round-trip mode |
+| `--huge PAGES` | buffer pages: `auto` (default: hugetlb pages if reserved, else normal pages with THP), `2M` or `1G` (reserved hugetlb pages of that size, or an error saying how many to reserve), `none` (4K pages, THP off) |
+| `--mem-node N` | put the buffers on NUMA node N instead of the measured CPU's own, to measure a remote node |
+| `--json FILE` | write the whole report to FILE as JSON; `-` for stdout, which then holds the JSON alone |
+| `--tracemark` | write every outlier to the ftrace buffer (`trace_marker`) |
+| `--breaktrace US` | at the first outlier of at least US microseconds: write a marker, stop ftrace (`tracing_on` = 0) and end the run |
 | `-V`, `--version` | print the version |
 | `-h`, `--help` | print the usage text |
 
-Invalid arguments (a CPU that does not exist or is offline, a size that does
-not fit, an unknown option) exit with status 1 and a message on stderr.
+Invalid arguments (a CPU or NUMA node that does not exist or is offline, a
+size that does not fit or exceeds the available memory, an unknown option)
+exit with status 1 and a message on stderr.
 
 Examples:
 
@@ -116,9 +133,31 @@ memlat benchmark 2 60 --pingpong 3
 
 # core-to-core latency of CPUs 0-15
 memlat c2c 0-15
+
+# 16G on 1G hugetlb pages, on the other socket's memory
+echo 16 | sudo tee /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages
+memlat benchmark 2 16G 60 --huge 1G --mem-node 1
+
+# the report as JSON, for scripts
+memlat benchmark 2 512K 60 --json - | jq '.runs[0].max_us'
 ```
 
-## CSV output (`--log FILE`)
+### Finding the cause of a stall with ftrace
+
+Record what the kernel does on the measured CPU, and stop the recording at
+the first long stall, so the trace ends with what led up to it:
+
+```sh
+sudo trace-cmd start -C mono -e irq -e sched -e timer -e workqueue
+sudo memlat benchmark 3 4G 600 --breaktrace 50
+sudo trace-cmd show | tail -100
+```
+
+`-C mono` makes the trace timestamps `CLOCK_MONOTONIC`, the clock of the
+outlier times in the report. With `--tracemark` every outlier appears in the
+trace as a `memlat: stall cpu N D ns` marker.
+
+## CSV and JSON output (`--log FILE`, `--json FILE`)
 
 `benchmark` and `top` write one line per kept outlier, all CPUs in one file,
 oldest first per CPU:
@@ -136,6 +175,12 @@ cpu,clock_monotonic,t_ms,dur_us,delta_ms
 3,20824.918914163,0.772441,52.083,0.000000
 3,20824.918961800,0.820192,17.295,0.047751
 ```
+
+`--json FILE` writes all of the report: per CPU the histogram, every kept
+outlier (`mono_sec` / `mono_nsec`, `t_ms`, `dur_us`), the periodic patterns,
+the interrupts, the core clock and the NUMA node; then the SMI count, the
+coincidences across CPUs and the configuration. `c2c --json` writes the
+matrix and the topology.
 
 `c2c` writes one line per measured pair, one-way latencies in ns (round trip
 / 2, TSC read cost removed):
@@ -192,7 +237,8 @@ median one-way latency (ns):
 ## Tests
 
 Unit tests cover the argument parsing, the period search, the measurement
-loop (with a fake workload that injects stalls) and the live-view
+loop (with a fake workload that injects stalls), the buffer mappings, the
+interrupt tables, the ftrace markers, the JSON writer and the live-view
 formatting; integration tests run the binary and check its exit codes and
 messages.
 

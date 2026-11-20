@@ -4,6 +4,36 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-11-20
+
+### Added
+
+- The report lists the interrupts and softirqs that ran on each measured
+  CPU (and the ping-pong partner) during the measurement, from
+  `/proc/interrupts` and `/proc/softirqs`.
+- `--tracemark` writes every outlier to the ftrace buffer; `--breaktrace US`
+  stops ftrace and the run at the first outlier of at least US
+  microseconds, as in cyclictest.
+- `--huge auto|2M|1G|none` chooses the buffer pages; 1G hugetlb pages keep
+  the TLB out of the picture even for large DRAM buffers, `none` shows what
+  it adds.
+- `--mem-node N` puts the buffers on a chosen NUMA node, to measure a remote
+  node. The report says which node each buffer is on and whether it is the
+  measured CPU's own.
+- `--json FILE` (or `-` for stdout) writes the whole report as JSON, for
+  `benchmark`, `top` and `c2c`.
+
+### Fixed
+
+- Transparent huge pages never applied to the buffer when THP is in
+  `madvise` mode: it was populated before the advice, then collapsed by
+  khugepaged during the measurement. It is now populated after the advice
+  and is on huge pages from the start.
+- Freeing a hugetlb buffer whose size was not a multiple of the page size
+  failed.
+- In `benchmark` the SMI count now starts after the settle phase, so it
+  covers the measurement alone.
+
 ## [0.1.1] - 2026-11-20
 
 ### Fixed
@@ -45,5 +75,6 @@ First public release.
 - Unit and integration tests, CI (fmt, build, test, clippy, static musl
   build) and release binaries for x86_64 Linux.
 
+[0.2.0]: https://github.com/ionutnechita/ionutnechita-memlat-rs/releases/tag/v0.2.0
 [0.1.1]: https://github.com/ionutnechita/ionutnechita-memlat-rs/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ionutnechita/ionutnechita-memlat-rs/releases/tag/v0.1.0
