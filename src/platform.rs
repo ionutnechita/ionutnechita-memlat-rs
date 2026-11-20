@@ -302,6 +302,72 @@ pub fn hugetlb_shortfall(size: u64, count: u64, page: u64) -> Option<String> {
     hugetlb_shortfall_in(size, count, page, free_hugetlb(page))
 }
 
+// NUMA nodes are numbered below this (the node mask passed to mbind)
+pub const MAX_NODES: usize = 1024;
+const MPOL_BIND: libc::c_int = 2;
+const MPOL_F_NODE: libc::c_int = 1;
+const MPOL_F_ADDR: libc::c_int = 2;
+
+// nodes in /sys/devices/system/node/online, None if unreadable (no NUMA)
+pub fn online_nodes() -> Option<Vec<usize>> {
+    let s = fs::read_to_string("/sys/devices/system/node/online").ok()?;
+    crate::cli::parse_cpus(s.trim()).ok()
+}
+
+// the NUMA node of a CPU (its nodeN entry in sysfs)
+pub fn cpu_node(cpu: usize) -> Option<usize> {
+    fs::read_dir(format!("/sys/devices/system/cpu/cpu{cpu}"))
+        .ok()?
+        .filter_map(|e| e.ok()?.file_name().to_str()?.strip_prefix("node")?.parse().ok())
+        .next()
+}
+
+// Places [addr, addr + len) on `node` only (MPOL_BIND), before it is
+// populated: the pages are then allocated there or not at all.
+pub fn bind_to_node(addr: *mut libc::c_void, len: usize, node: usize) -> io::Result<()> {
+    if node >= MAX_NODES {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    let mut mask = [0 as libc::c_ulong; MAX_NODES / 64];
+    mask[node / 64] |= 1 << (node % 64);
+    // the kernel reads maxnode - 1 bits
+    let maxnode = MAX_NODES as libc::c_ulong + 1;
+    // SAFETY: addr..addr+len is a mapping of ours; mask holds MAX_NODES bits
+    let r = unsafe { libc::syscall(libc::SYS_mbind, addr, len, MPOL_BIND, mask.as_ptr(), maxnode, 0) };
+    if r != 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+}
+
+// the node of the page at `addr`, which must be populated
+pub fn page_node(addr: *mut libc::c_void) -> Option<usize> {
+    let mut node: libc::c_int = -1;
+    // SAFETY: node is writable; no node mask is asked for (null, 0)
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_get_mempolicy,
+            &mut node as *mut libc::c_int,
+            std::ptr::null_mut::<libc::c_ulong>(),
+            0 as libc::c_ulong,
+            addr,
+            MPOL_F_NODE | MPOL_F_ADDR,
+        )
+    };
+    (r == 0 && node >= 0).then_some(node as usize)
+}
+
+// the nodes a buffer's pages are on, from 16 pages spread over it
+pub fn buffer_nodes(addr: *mut libc::c_void, len: usize) -> Vec<usize> {
+    let mut nodes: Vec<usize> = (0..16)
+        .filter_map(|i| {
+            let off = (len / 16 * i) & !4095;
+            // SAFETY: off < len, inside the mapping
+            page_node(unsafe { addr.cast::<u8>().add(off) }.cast())
+        })
+        .collect();
+    nodes.sort_unstable();
+    nodes.dedup();
+    nodes
+}
+
 const MSR_SMI_COUNT: u64 = 0x34;
 
 fn is_intel() -> bool {

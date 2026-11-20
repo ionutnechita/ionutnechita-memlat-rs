@@ -120,6 +120,41 @@ fn check_memory(size: usize, count: usize, pages: Pages) {
     }
 }
 
+// --mem-node must name an online node with memory
+fn check_node(node: Option<usize>) {
+    let Some(n) = node else {
+        return;
+    };
+    match platform::online_nodes() {
+        Some(nodes) if nodes.contains(&n) => {}
+        Some(_) => {
+            eprintln!("numa node {n} does not exist or is offline");
+            process::exit(1);
+        }
+        None => {
+            eprintln!("--mem-node: no NUMA information (/sys/devices/system/node)");
+            process::exit(1);
+        }
+    }
+}
+
+// the NUMA nodes a buffer is on, and whether they are the CPU's own
+fn numa_note(cpu: usize, map: Option<&Mapping>) -> String {
+    let Some(m) = map else {
+        return String::new();
+    };
+    let (addr, len) = m.range();
+    let nodes = platform::buffer_nodes(addr, len);
+    let cpu_node = platform::cpu_node(cpu);
+    let list = nodes.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
+    match (nodes.as_slice(), cpu_node) {
+        ([], _) => String::new(),
+        ([n], Some(c)) if *n == c => format!("buffer on node {n}, local to the cpu"),
+        (_, Some(c)) => format!("buffer on node {list}, cpu on node {c}: remote"),
+        (_, None) => format!("buffer on node {list}"),
+    }
+}
+
 // CPUs that are not online make sched_setaffinity fail deep in a thread
 fn check_cpus(prog: &str, cpus: &[usize]) {
     or_exit(prog, cli::check_online(cpus, platform::online_cpus().as_deref()));
@@ -149,13 +184,20 @@ fn lock() {
 
 // pin, allocate, lock and build the chase cycle on the measured CPU, so the
 // buffer is first-touched on its NUMA node; nothing to allocate for ping-pong
-fn setup(cpu: usize, size: usize, pages: Pages) -> Option<Mapping> {
+fn setup(cpu: usize, size: usize, pages: Pages, node: Option<usize>) -> Option<Mapping> {
     pin(cpu);
     if size == 0 {
         lock();
         return None;
     }
-    let mut map = Mapping::new(size, pages, |_| Ok(())).unwrap_or_else(|e| die("mmap", e));
+    let bind = |m: &Mapping| match node {
+        Some(n) => {
+            let (addr, len) = m.range();
+            platform::bind_to_node(addr, len, n)
+        }
+        None => Ok(()),
+    };
+    let mut map = Mapping::new(size, pages, bind).unwrap_or_else(|e| die("buffer", e));
     lock();
     map.build_cycle();
     Some(map)
@@ -292,6 +334,7 @@ fn benchmark(prog: &str, a: &[String]) {
     let (c, secs) = or_exit(prog, cli::benchmark(a));
     check_cpus(prog, &c.all_cpus());
     check_memory(c.size, c.cpus.len(), c.pages);
+    check_node(c.mem_node);
     check_trace(&c);
     platform::warn_tsc();
     platform::install_signal_handlers();
@@ -312,7 +355,7 @@ fn benchmark(prog: &str, a: &[String]) {
         .iter()
         .map(|&cpu| {
             let (ready, size, keep, prio, pp) = (Arc::clone(&ready), c.size, c.keep, c.fifo, pp.clone());
-            let pages = c.pages;
+            let (pages, node) = (c.pages, c.mem_node);
             let tracer = tracer(cpu, &c);
             thread::Builder::new()
                 .name(format!("memlat-{cpu}"))
@@ -321,7 +364,7 @@ fn benchmark(prog: &str, a: &[String]) {
                     // allocated before setup() so mlockall covers it
                     let inner = Collect { buf: vec![Outlier::default(); keep], len: 0 };
                     let mut sink = Traced { inner, tracer };
-                    let map = setup(cpu, size, pages);
+                    let map = setup(cpu, size, pages, node);
                     fifo(prio);
                     let tsc_read_ns = measure::tsc_overhead() as f64 / tpn;
                     ready.wait();
@@ -335,7 +378,8 @@ fn benchmark(prog: &str, a: &[String]) {
                     };
                     let (lines, pages) =
                         map.as_ref().map_or((0, String::new()), |m| (m.lines, m.backing.label()));
-                    CpuRun { cpu, lines, pages, r, outs: sink.buf, note, newest: false, tsc_read_ns }
+                    let numa = numa_note(cpu, map.as_ref());
+                    CpuRun { cpu, lines, pages, numa, r, outs: sink.buf, note, newest: false, tsc_read_ns }
                 })
                 .expect("spawn measurement thread")
         })
@@ -364,6 +408,7 @@ fn top(prog: &str, a: &[String]) {
     let c = or_exit(prog, cli::top(a));
     check_cpus(prog, &c.all_cpus());
     check_memory(c.size, 1, c.pages);
+    check_node(c.mem_node);
     check_trace(&c);
     platform::warn_tsc();
     let cpu = c.cpus[0];
@@ -372,7 +417,7 @@ fn top(prog: &str, a: &[String]) {
     platform::block_signals();
     let pp = c.partner.map(|_| Arc::new(pingpong::Shared::new()));
     let partner = c.partner.zip(pp.clone()).map(|(cpu, s)| spawn_partner(cpu, c.fifo, s, None));
-    let map = setup(cpu, c.size, c.pages);
+    let map = setup(cpu, c.size, c.pages, c.mem_node);
     let tpn = measure::tsc_per_ns();
     fifo(c.fifo);
     let mut boost = c.fifo.map(|prio| platform::Boost::apply(&c.all_cpus(), prio));
@@ -397,7 +442,8 @@ fn top(prog: &str, a: &[String]) {
     finished(boost.as_mut());
     let got = top::finish(display);
     let note = if got.missed > 0 { format!(" ({} not kept)", got.missed) } else { String::new() };
-    let run = CpuRun { cpu, lines, pages, r, outs: got.outs, note, newest: true, tsc_read_ns };
+    let numa = numa_note(cpu, map.as_ref());
+    let run = CpuRun { cpu, lines, pages, numa, r, outs: got.outs, note, newest: true, tsc_read_ns };
     let window = report::Window { smi: got.smi, irq: (irq0, irq1) };
     report(&c, tpn, &[run], &window, boost.as_ref());
 }

@@ -17,6 +17,7 @@ pub struct CpuRun {
     pub cpu: usize,
     pub lines: usize,
     pub pages: String, // what the buffer is on; empty for ping-pong
+    pub numa: String,  // which NUMA node the buffer is on; empty if unknown
     pub r: RunResult,
     pub outs: Vec<Outlier>, // oldest first
     pub note: String,
@@ -143,6 +144,9 @@ fn print_run(c: &Config, tpn: f64, run: &CpuRun) {
         st.iters,
         tpn
     );
+    if !run.numa.is_empty() {
+        println!("numa: {}", run.numa);
+    }
     println!(
         "tsc read (lfence + rdtsc) = {:.1} ns, part of every iteration time below; \
          the loop ran {:.0} s before the measurement to settle",

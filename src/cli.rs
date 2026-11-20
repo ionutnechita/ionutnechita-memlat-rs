@@ -49,6 +49,8 @@ options:
   --pingpong CPU   partner cpu for the round-trip mode
   --huge PAGES     buffer pages: auto (hugetlb if reserved, else THP; default),
                    2M or 1G (reserved hugetlb pages, or an error), none (4K)
+  --mem-node N     put the buffers on NUMA node N (default: the node of each
+                   measured cpu), to measure a remote node
   --tracemark      write every outlier to the ftrace buffer (trace_marker)
   --breaktrace US  stop ftrace (tracing_on = 0) and the run at the first
                    outlier of at least US microseconds
@@ -132,6 +134,7 @@ pub struct Opts {
     pub tracemark: bool,
     pub breaktrace_us: Option<u64>,
     pub pages: Pages,
+    pub mem_node: Option<usize>,
 }
 
 impl Default for Opts {
@@ -144,13 +147,14 @@ impl Default for Opts {
             tracemark: false,
             breaktrace_us: None,
             pages: Pages::Auto,
+            mem_node: None,
         }
     }
 }
 
 // options without a value
 const FLAGS: [&str; 1] = ["tracemark"];
-const VALUED: [&str; 6] = ["log", "fifo", "keep", "pingpong", "breaktrace", "huge"];
+const VALUED: [&str; 7] = ["log", "fifo", "keep", "pingpong", "breaktrace", "huge", "mem-node"];
 
 // options may come anywhere; returns them and the positional arguments
 pub fn options(args: &[String]) -> Result<(Opts, Vec<String>)> {
@@ -194,6 +198,13 @@ pub fn options(args: &[String]) -> Result<(Opts, Vec<String>)> {
                 o.fifo = Some(p);
             }
             "keep" => o.keep = num(&value, "keep")?,
+            "mem-node" => {
+                let n: usize = num(&value, "numa node")?;
+                if n >= crate::platform::MAX_NODES {
+                    return invalid(format!("numa node {n} does not exist"));
+                }
+                o.mem_node = Some(n);
+            }
             "huge" => {
                 let Some(p) = Pages::parse(&value) else {
                     return invalid(format!("invalid --huge: {value} (auto, 2M, 1G or none)"));
@@ -226,6 +237,7 @@ pub struct Config {
     pub tracemark: bool,
     pub breaktrace_us: Option<u64>,
     pub pages: Pages,
+    pub mem_node: Option<usize>,
 }
 
 impl Config {
@@ -238,12 +250,16 @@ impl Config {
 // cpus, size (unless --pingpong), then the positional arguments that follow,
 // with the threshold at `thresh_pos` (counting the size slot either way)
 fn parse(args: &[String], thresh_pos: usize) -> Result<(Config, Vec<String>)> {
-    let (Opts { log, fifo, keep, partner, tracemark, breaktrace_us, pages }, mut pos) = options(args)?;
+    let (Opts { log, fifo, keep, partner, tracemark, breaktrace_us, pages, mem_node }, mut pos) =
+        options(args)?;
     let cpus = parse_cpus(pos.first().ok_or(Error::Usage)?)?;
     let (size_str, size) = match partner {
         Some(p) => {
             if cpus.len() != 1 || cpus[0] == p {
                 return invalid("--pingpong needs one measured cpu and a different partner cpu");
+            }
+            if mem_node.is_some() {
+                return invalid("--mem-node places the buffer, there is none with --pingpong");
             }
             // no size argument: keep the positions of the others
             pos.insert(1, String::new());
@@ -274,7 +290,20 @@ fn parse(args: &[String], thresh_pos: usize) -> Result<(Config, Vec<String>)> {
         }
     }
     Ok((
-        Config { cpus, size_str, size, thresh_ns, log, fifo, keep, partner, tracemark, breaktrace_us, pages },
+        Config {
+            cpus,
+            size_str,
+            size,
+            thresh_ns,
+            log,
+            fifo,
+            keep,
+            partner,
+            tracemark,
+            breaktrace_us,
+            pages,
+            mem_node,
+        },
         pos,
     ))
 }
@@ -395,6 +424,7 @@ mod tests {
         assert_eq!(o.breaktrace_us, Some(50));
         assert_eq!(options(&args("--huge 1G")).unwrap().0.pages, Pages::Huge1G);
         assert_eq!(options(&args("--huge=none")).unwrap().0.pages, Pages::Small);
+        assert_eq!(options(&args("--mem-node 1")).unwrap().0.mem_node, Some(1));
         assert_eq!(options(&args("2 -h")), Err(Error::Help));
         assert_eq!(options(&args("--help")), Err(Error::Help));
         assert_eq!(options(&args("2 --version")), Err(Error::Version));
@@ -411,6 +441,8 @@ mod tests {
             "--breaktrace 0",
             "--huge 4K",
             "--huge",
+            "--mem-node x",
+            "--mem-node 5000",
             "--breaktrace x",
         ] {
             assert!(matches!(options(&args(bad)), Err(Error::Invalid(_))), "{bad}");
@@ -449,7 +481,7 @@ mod tests {
         assert_eq!(c.all_cpus(), [2, 3]);
         let c = top(&args("2 --pingpong 3")).unwrap();
         assert_eq!((c.size, c.thresh_ns), (0, DEFAULT_THRESH_NS));
-        for bad in ["2 60 --pingpong 2", "2,4 60 --pingpong 3"] {
+        for bad in ["2 60 --pingpong 2", "2,4 60 --pingpong 3", "2 60 --pingpong 3 --mem-node 0"] {
             assert!(matches!(benchmark(&args(bad)), Err(Error::Invalid(_))), "{bad}");
         }
     }

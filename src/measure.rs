@@ -284,6 +284,11 @@ impl Mapping {
         Ok(m)
     }
 
+    // the mapped range, for mbind() and get_mempolicy()
+    pub fn range(&self) -> (*mut libc::c_void, usize) {
+        (self.ptr.cast(), self.len)
+    }
+
     fn populate(&self) -> io::Result<()> {
         // SAFETY: the whole mapping made in new()
         if unsafe { libc::madvise(self.ptr.cast(), self.len, MADV_POPULATE_WRITE) } == 0 {

@@ -58,6 +58,8 @@ fn invalid_values_say_why() {
         ("benchmark 0 512K 1 --log", "--log needs a value"),
         ("benchmark 0 1 --pingpong 0", "different partner cpu"),
         ("top 0,1 16M", "top measures one cpu"),
+        ("benchmark 0 512K 1 --mem-node 1023", "numa node 1023 does not exist"),
+        ("benchmark 0 512K 1 --huge 4K", "invalid --huge"),
         // far more than any machine running the tests has
         ("benchmark 0 1000000G 1", "is available"),
         ("c2c 0", "c2c needs at least two cpus"),
