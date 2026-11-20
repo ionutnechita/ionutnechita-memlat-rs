@@ -354,10 +354,23 @@ pub fn run<W: Work, S: Sink>(work: &mut W, p: &Params, sink: &mut S) -> RunResul
 
 #[cfg(test)]
 mod tests {
-    // repeated probes agree within a few percent (most of them)
+    // Repeated probes agree within a few percent (most of them). Pinned, so the
+    // probes do not move between cores running at different clocks, and after
+    // a warm-up, so the clock is no longer ramping up from idle. Depends on
+    // the hardware and on the load of the other cores (no frequency changes
+    // during the ~1 ms of probes), so it only runs when asked for:
+    //   cargo test --release -- --ignored --test-threads=1
     #[test]
+    #[ignore = "needs a quiet machine with a steady core clock"]
     fn core_probe_stable() {
+        let cpu = unsafe { libc::sched_getcpu() };
+        assert!(cpu >= 0);
+        super::pin_to_cpu(cpu as usize).expect("pin");
         let tpn = super::tsc_per_ns();
+        let warm = std::time::Instant::now();
+        while warm.elapsed() < std::time::Duration::from_millis(300) {
+            super::core_mhz(tpn);
+        }
         let mut v: Vec<u32> = (0..40).map(|_| super::core_mhz(tpn)).filter(|&m| m > 0).collect();
         assert!(v.len() >= 20);
         v.sort_unstable();
