@@ -157,6 +157,52 @@ sudo trace-cmd show | tail -100
 outlier times in the report. With `--tracemark` every outlier appears in the
 trace as a `memlat: stall cpu N D ns` marker.
 
+## Reading the report
+
+**Histogram.** Nearly all iterations should sit in the first bucket or two:
+one dependent load from L2 is a few ns, from DRAM about 80-150 ns, and every
+iteration also includes the TSC read (`tsc read` in the report, typically
+10-25 ns). The tail of the histogram is what the tool is about.
+
+**Where the stall comes from.** Run the same CPU with an L2-sized buffer
+(`512K`) and a DRAM-sized one (`4G`):
+
+- outliers only with DRAM: the memory subsystem or fabric. Try
+  `--huge 1G` to rule out page walks, `--mem-node` to compare the local and
+  a remote node, and `--pingpong` to see the fabric without DRAM;
+- outliers with both: the core itself was taken away. The interrupt and SMI
+  sections usually say by what.
+
+**Interrupts on the measured CPU.** On a well isolated CPU (`isolcpus`,
+`nohz_full`, `rcu_nocbs`, `irqaffinity`) this section is nearly empty.
+
+| Source | Meaning | Usual remedy |
+|---|---|---|
+| `LOC` about HZ per second | the scheduler tick still runs | `nohz_full=` on the CPU, and only one runnable task on it |
+| `RES` | rescheduling IPIs: something else wanted to run there | move the other tasks and kernel threads off the CPU |
+| `CAL` | function-call IPIs sent by other CPUs (e.g. `smp_call_function`) | find the sender with ftrace (`--breaktrace`, `-e ipi`) |
+| `TLB` | TLB shootdowns from a process that changed its mappings | keep processes sharing memory with the RT task off its CPUs |
+| numbered IRQs | a device interrupt delivered to the CPU | `/proc/irq/N/smp_affinity_list`, `irqaffinity=` |
+| `TIMER`, `RCU` softirqs | timers and RCU callbacks run on the CPU | `nohz_full=`, `rcu_nocbs=` |
+
+**SMIs.** Any SMI during the run is firmware taking every CPU into System
+Management Mode; it shows as stalls on all measured CPUs at the same instant
+(see the coincidences). Only the BIOS / firmware settings can remove them.
+
+**Periodic outliers.** A stable period means something scheduled: a timer,
+a firmware poll, a memory controller task. Several phases are several events
+per period. Compare the period with the interrupt counts and the SMI count
+over the run, and use `--breaktrace` to catch one in a trace.
+
+**Stalls on several CPUs at once.** Far more coincidences than expected by
+chance point to a shared cause: SMIs, the memory controller or fabric, an
+uncore frequency change. Stalls on one CPU only are local: an interrupt, the
+sibling hyperthread, the core's power state.
+
+**Core clock.** A min and max that differ mean the core changed frequency
+during the run (turbo, power or thermal limits); for repeatable results
+use the `performance` governor and a fixed frequency.
+
 ## CSV and JSON output (`--log FILE`, `--json FILE`)
 
 `benchmark` and `top` write one line per kept outlier, all CPUs in one file,
