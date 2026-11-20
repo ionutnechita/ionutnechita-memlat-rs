@@ -91,6 +91,21 @@ fn or_exit<T>(prog: &str, r: cli::Result<T>) -> T {
     }
 }
 
+// buffers that do not fit in memory would be OOM-killed while populated
+fn check_memory(size: usize, count: usize) {
+    if size == 0 {
+        return;
+    }
+    let Some(m) = std::fs::read_to_string("/proc/meminfo").ok().and_then(|s| platform::parse_meminfo(&s))
+    else {
+        return;
+    };
+    if let Some(msg) = platform::memory_shortfall(size as u64, count as u64, &m) {
+        eprintln!("{msg}");
+        process::exit(1);
+    }
+}
+
 // CPUs that are not online make sched_setaffinity fail deep in a thread
 fn check_cpus(prog: &str, cpus: &[usize]) {
     or_exit(prog, cli::check_online(cpus, platform::online_cpus().as_deref()));
@@ -220,6 +235,7 @@ impl Sink for Collect {
 fn benchmark(prog: &str, a: &[String]) {
     let (c, secs) = or_exit(prog, cli::benchmark(a));
     check_cpus(prog, &c.all_cpus());
+    check_memory(c.size, c.cpus.len());
     platform::warn_tsc();
     platform::install_signal_handlers();
     platform::avoid_cpus(&c.all_cpus());
@@ -279,6 +295,7 @@ fn benchmark(prog: &str, a: &[String]) {
 fn top(prog: &str, a: &[String]) {
     let c = or_exit(prog, cli::top(a));
     check_cpus(prog, &c.all_cpus());
+    check_memory(c.size, 1);
     platform::warn_tsc();
     let cpu = c.cpus[0];
     platform::install_signal_handlers();

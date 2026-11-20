@@ -231,6 +231,49 @@ pub fn warn_tsc() {
     }
 }
 
+// Memory the buffers can come from, in bytes: MemAvailable (normal pages)
+// and the free hugetlb pages, which MemAvailable does not count.
+#[derive(Debug, PartialEq)]
+pub struct MemInfo {
+    pub available: u64,
+    pub huge_free: u64,
+}
+
+pub fn parse_meminfo(s: &str) -> Option<MemInfo> {
+    let field = |name: &str| -> Option<u64> {
+        let line = s.lines().find(|l| l.split(':').next() == Some(name))?;
+        line.split(':').nth(1)?.split_whitespace().next()?.parse().ok()
+    };
+    let huge_free = field("HugePages_Free").unwrap_or(0) * field("Hugepagesize").unwrap_or(0) * 1024;
+    Some(MemInfo { available: field("MemAvailable")? * 1024, huge_free })
+}
+
+fn gib(b: u64) -> f64 {
+    b as f64 / (1u64 << 30) as f64
+}
+
+// Why `count` buffers of `size` bytes cannot be allocated, if they cannot:
+// each one is populated up front (MAP_POPULATE), so going past what is
+// available would get the process, or another one, killed by the OOM killer.
+pub fn memory_shortfall(size: u64, count: u64, m: &MemInfo) -> Option<String> {
+    let need = size.saturating_mul(count);
+    // all from hugetlb pages, or else (in the worst case) all from normal ones
+    if need <= m.huge_free || need <= m.available {
+        return None;
+    }
+    Some(format!(
+        "{count} {} of {:.2} GiB {} {:.2} GiB, but only {:.2} GiB is available \
+         ({:.2} GiB MemAvailable, {:.2} GiB free hugetlb pages)",
+        if count == 1 { "buffer" } else { "buffers" },
+        gib(size),
+        if count == 1 { "needs" } else { "need" },
+        gib(need),
+        gib(m.available.max(m.huge_free)),
+        gib(m.available),
+        gib(m.huge_free)
+    ))
+}
+
 const MSR_SMI_COUNT: u64 = 0x34;
 
 fn is_intel() -> bool {
@@ -260,6 +303,36 @@ pub fn smi_count() -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::missing_tsc_flags;
+
+    use super::{MemInfo, memory_shortfall, parse_meminfo};
+
+    const MEMINFO: &str = "MemTotal:       32000000 kB\nMemFree:         1000000 kB\n\
+        MemAvailable:   16000000 kB\nHugePages_Total:     512\nHugePages_Free:      256\n\
+        Hugepagesize:       2048 kB\n";
+
+    #[test]
+    fn meminfo() {
+        let m = parse_meminfo(MEMINFO).unwrap();
+        assert_eq!(m, MemInfo { available: 16_000_000 * 1024, huge_free: 256 * 2048 * 1024 });
+        let no_huge = parse_meminfo("MemAvailable:   1000 kB\n").unwrap();
+        assert_eq!(no_huge, MemInfo { available: 1_024_000, huge_free: 0 });
+        assert_eq!(parse_meminfo("MemTotal: 1000 kB\n"), None);
+    }
+
+    #[test]
+    fn shortfall() {
+        let m = MemInfo { available: 16 << 30, huge_free: 1 << 30 };
+        assert_eq!(memory_shortfall(4 << 30, 4, &m), None);
+        assert_eq!(memory_shortfall(512 << 20, 2, &m), None);
+        let msg = memory_shortfall(16 << 30, 2, &m).unwrap();
+        assert!(msg.starts_with("2 buffers of 16.00 GiB need 32.00 GiB"), "{msg}");
+        // fits in the free hugetlb pages, though not in MemAvailable
+        let huge = MemInfo { available: 1 << 30, huge_free: 8 << 30 };
+        assert_eq!(memory_shortfall(4 << 30, 2, &huge), None);
+        assert!(memory_shortfall(u64::MAX, 2, &m).is_some());
+        let one = memory_shortfall(32 << 30, 1, &m).unwrap();
+        assert!(one.starts_with("1 buffer of 32.00 GiB needs 32.00 GiB"), "{one}");
+    }
 
     #[test]
     fn tsc_flags() {
